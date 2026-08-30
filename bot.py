@@ -2,7 +2,7 @@ import datetime
 import os
 import asyncio
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from aiohttp import web
 
 intents = discord.Intents.default()
@@ -11,6 +11,32 @@ intents.message_content = True
 intents.members = True  # Обязательно для выдачи ролей и пингов
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Словарь опыта: {user_id: {"exp": 0, "level": 1}}
+users_exp = {}
+
+# Функция для получения названия ранга по уровню (все 100 уровней)
+def get_rank_title(level):
+    if level >= 90:
+        return "👑 Легенда"
+    elif level >= 80:
+        return "🔴 Бессмертный"
+    elif level >= 70:
+        return "🟣 Владыка"
+    elif level >= 60:
+        return "🟣 Элита"
+    elif level >= 50:
+        return "🟠 Авторитет"
+    elif level >= 40:
+        return "🟠 Головорез"
+    elif level >= 30:
+        return "🟡 Ветеран"
+    elif level >= 20:
+        return "🟡 Служака"
+    elif level >= 10:
+        return "🟢 Боец"
+    else:
+        return "🟢 Новобранец"
 
 # Простенький web-сервер для того, чтобы Render видел открытый порт
 async def handle(request):
@@ -150,11 +176,87 @@ async def update_server_status(guild):
         )
 
 
+# Фоновая задача: начисление опыта за нахождение в голосовых каналах (каждую минуту)
+@tasks.loop(minutes=1)
+async def voice_exp_loop():
+    for guild in bot.guilds:
+        for vc in guild.voice_channels:
+            # Игнорируем АФК-канал и каналы, где человек сидит один
+            if vc.name == "💀 АФК" or len(vc.members) < 2:
+                continue
+            
+            for member in vc.members:
+                if member.bot:
+                    continue
+                # Если микрофон или звук выключены — очки не капают
+                if member.voice and (member.voice.self_mute or member.voice.self_deaf):
+                    continue
+
+                user_id = member.id
+                if user_id not in users_exp:
+                    users_exp[user_id] = {"exp": 0, "level": 1}
+
+                users_exp[user_id]["exp"] += 3
+
+                current_level = users_exp[user_id]["level"]
+                exp_needed = current_level * 100
+
+                if users_exp[user_id]["exp"] >= exp_needed:
+                    users_exp[user_id]["level"] += 1
+                    users_exp[user_id]["exp"] -= exp_needed
+                    new_lvl = users_exp[user_id]["level"]
+                    rank_title = get_rank_title(new_lvl)
+                    
+                    channel = discord.utils.get(guild.text_channels, name="💬-флудилка")
+                    if channel:
+                        await channel.send(
+                            f"🎉 {member.mention} поднял уровень за активность в войсе! Теперь у него **LVL {new_lvl}** *({rank_title})*!"
+                        )
+
+
+# Фоновая задача: раз в сутки автоматически постит топ игроков в флудилку
+@tasks.loop(hours=24)
+async def auto_leaderboard():
+    for guild in bot.guilds:
+        channel = discord.utils.get(guild.text_channels, name="💬-флудилка")
+        if not channel:
+            continue
+
+        if not users_exp:
+            continue
+
+        sorted_users = sorted(
+            users_exp.items(), 
+            key=lambda x: (x[1]["level"], x[1]["exp"]), 
+            reverse=True
+        )
+
+        desc = ""
+        for index, (uid, data) in enumerate(sorted_users[:10], start=1):
+            member = guild.get_member(uid)
+            name = member.display_name if member else "Боец"
+            lvl = data['level']
+            rank_title = get_rank_title(lvl)
+            desc += f"**{index}.** {name} — **LVL {lvl}** *({rank_title})* (`{data['exp']} XP`)\n"
+
+        embed = discord.Embed(
+            title="🏆 ТАБЛИЦА РАНГОВ СЕРВЕРА",
+            description=desc,
+            color=0x8B0000,
+        )
+        embed.set_footer(text="Автоматическая сводка • ПРАЧКА ДРАЧКА")
+        await channel.send(embed=embed)
+
+
 @bot.event
 async def on_ready():
     print(f"Бот {bot.user} в деле!")
     # Запускаем веб-сервер в фоне для Render
     asyncio.create_task(start_web_server())
+    if not auto_leaderboard.is_running():
+        auto_leaderboard.start()
+    if not voice_exp_loop.is_running():
+        voice_exp_loop.start()
     for guild in bot.guilds:
         await update_server_status(guild)
 
@@ -172,6 +274,59 @@ async def on_member_join(member):
 @bot.event
 async def on_voice_state_update(member, before, after):
     await update_server_status(member.guild)
+
+
+# Обработка текстовых сообщений для начисления опыта
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    user_id = message.author.id
+    if user_id not in users_exp:
+        users_exp[user_id] = {"exp": 0, "level": 1}
+
+    users_exp[user_id]["exp"] += 15
+
+    current_level = users_exp[user_id]["level"]
+    exp_needed = current_level * 100
+
+    if users_exp[user_id]["exp"] >= exp_needed:
+        users_exp[user_id]["level"] += 1
+        users_exp[user_id]["exp"] -= exp_needed
+        new_lvl = users_exp[user_id]["level"]
+        rank_title = get_rank_title(new_lvl)
+        await message.channel.send(
+            f"🎉 {message.author.mention} повысил квалификацию! Теперь у него **LVL {new_lvl}** *({rank_title})*!"
+        )
+
+    await bot.process_commands(message)
+
+
+# Команда проверки профиля и уровня
+@bot.command(name="lvl")
+async def lvl(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    user_data = users_exp.get(target.id, {"exp": 0, "level": 1})
+
+    current_lvl = user_data["level"]
+    current_exp = user_data["exp"]
+    exp_needed = current_lvl * 100
+    rank_title = get_rank_title(current_lvl)
+
+    embed = discord.Embed(
+        title=f"📊 Профиль: {target.name}",
+        color=0x8B0000,
+    )
+    embed.add_field(name="Звание / Титул", value=f"🛡️ **{rank_title}**", inline=False)
+    embed.add_field(name="Уровень", value=f"⭐ **LVL {current_lvl}**", inline=True)
+    embed.add_field(
+        name="Опыт", value=f"💬 `{current_exp} / {exp_needed} XP`", inline=True
+    )
+    embed.set_thumbnail(url=target.avatar.url if target.avatar else None)
+    embed.set_footer(text="ПРАЧКА ДРАЧКА • Система уровней")
+
+    await ctx.send(embed=embed)
 
 
 @bot.command()

@@ -1,4 +1,5 @@
 import datetime
+import os
 import discord
 from discord.ext import commands
 
@@ -322,4 +323,4 @@ async def secret(ctx):
     pass
 
 
-bot.run("4e13603992fb2cd3156424dbd4f127dd4049850288875706ad60376d077abeea")
+bot.run(os.getenv("TOKEN"))

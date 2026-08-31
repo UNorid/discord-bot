@@ -14,7 +14,25 @@ intents.guilds = True
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+# Переводим стандартные сообщения ошибок бота на русский язык
+class RussianHelpCommand(commands.DefaultHelpCommand):
+    async def send_bot_help(self, mapping):
+        await super().send_bot_help(mapping)
+
+async def on_command_error_localized(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return  # Игнорируем неизвестные команды, чтобы не засорять чат
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"⚠️ {ctx.author.mention}, ты пропустил обязательный аргумент! Проверь правильность ввода команды.", delete_after=7)
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send(f"⚠️ {ctx.author.mention}, у тебя недостаточно прав для выполнения этой команды!", delete_after=7)
+    elif isinstance(error, commands.CheckFailure):
+        await ctx.send(f"⚠️ {ctx.author.mention}, эта команда тебе недоступна.", delete_after=7)
+    else:
+        raise error
+
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot.add_listener(on_command_error_localized, "on_command_error")
 
 # Инициализация базы данных SQLite
 DB_FILE = "bot_database.db"
@@ -42,7 +60,6 @@ def init_db():
 
 init_db()
 
-# Функции работы с базой данных
 def get_user_data(user_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -71,10 +88,8 @@ def update_user_data(user_id, exp, level):
     data = get_user_data(user_id)
     update_user_full(user_id, exp, level, data["last_daily"])
 
-# Словарь для отслеживания кулдаунов дуэлей/больницы
 cooldowns = {}
 
-# Функция для получения названия ранга по уровню
 def get_rank_title(level):
     if level >= 90:
         return "👑 Легенда"
@@ -97,7 +112,6 @@ def get_rank_title(level):
     else:
         return "🟢 Новобранец"
 
-# Простенький web-сервер для того, чтобы Render видел открытый порт
 async def handle(request):
     return web.Response(text="Bot is running!")
 
@@ -110,8 +124,7 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Web server started on port {port}")
-
+    print(f"Веб-сервер запущен на порту {port}")
 
 SERVER_ROLES = [
     {
@@ -201,8 +214,6 @@ SERVER_STRUCTURE = {
     ],
 }
 
-
-# Обновление интерактивного статуса
 async def update_server_status(guild):
     gaming_vc = discord.utils.get(guild.voice_channels, name="🎮 ИГРУЛИ")
     main_vc = discord.utils.get(guild.voice_channels, name="🔥 Основной")
@@ -234,8 +245,6 @@ async def update_server_status(guild):
             activity=discord.Game(name="Ждет сбора состава ⚡")
         )
 
-
-# Фоновая задача: начисление опыта за нахождение в голосовых каналах
 @tasks.loop(minutes=1)
 async def voice_exp_loop():
     for guild in bot.guilds:
@@ -268,8 +277,6 @@ async def voice_exp_loop():
                 
                 update_user_data(user_id, exp, level)
 
-
-# Фоновая задача: очистка просроченных временных ролей
 @tasks.loop(minutes=1)
 async def temp_roles_check():
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -293,8 +300,6 @@ async def temp_roles_check():
     conn.commit()
     conn.close()
 
-
-# Фоновая задача: авто-топ раз в сутки
 @tasks.loop(hours=24)
 async def auto_leaderboard():
     conn = sqlite3.connect(DB_FILE)
@@ -326,7 +331,6 @@ async def auto_leaderboard():
         embed.set_footer(text="Автоматическая сводка • ПРАЧКА ДРАЧКА")
         await channel.send(embed=embed)
 
-
 @bot.event
 async def on_ready():
     print(f"Бот {bot.user} в деле!")
@@ -340,7 +344,6 @@ async def on_ready():
     for guild in bot.guilds:
         await update_server_status(guild)
 
-
 @bot.event
 async def on_member_join(member):
     role = discord.utils.get(member.guild.roles, name="🎮 Боевой товарищ")
@@ -350,13 +353,10 @@ async def on_member_join(member):
         except Exception as e:
             print(f"Не удалось выдать роль: {e}")
 
-
 @bot.event
 async def on_voice_state_update(member, before, after):
     await update_server_status(member.guild)
 
-
-# Обработка текстовых сообщений для начисления опыта
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -378,9 +378,6 @@ async def on_message(message):
 
     update_user_data(user_id, exp, level)
     await bot.process_commands(message)
-
-
-# --- ИНТЕРАКТИВНЫЕ МОДАЛЫ И КНОПКИ ---
 
 class CustomRoleModal(Modal, title="Настройка своей временной роли"):
     role_name = TextInput(
@@ -440,7 +437,6 @@ class CustomRoleModal(Modal, title="Настройка своей временн
         except Exception as e:
             await interaction.followup.send(f"❌ Ошибка при создании роли: {e}", ephemeral=True)
 
-
 class FortuneWheelView(View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=60)
@@ -461,7 +457,6 @@ class FortuneWheelView(View):
             child.disabled = True
         
         try:
-            # Проверка лимита: активных временных ролей должно быть не более 15% от состава сервера
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM temp_roles")
@@ -517,7 +512,6 @@ class FortuneWheelView(View):
                     await general_ch.send("🎰 Колесо фортуны завершилось, но никто не нажал кнопку участия. Ничья!")
         except Exception as e:
             print(f"Ошибка в колесе фортуны: {e}")
-
 
 class HubView(View):
     def __init__(self):
@@ -586,7 +580,6 @@ class HubView(View):
         update_user_full(user_id, new_exp, level, today)
         await interaction.response.send_message(msg, ephemeral=True)
 
-
 class DuelAcceptView(View):
     def __init__(self, challenger: discord.Member, target: discord.Member, bet: int):
         super().__init__(timeout=30)
@@ -613,7 +606,6 @@ class DuelAcceptView(View):
         self.stop()
         await interaction.response.send_message(f"🛡️ {self.target.mention} благоразумно уклонился от драки.", ephemeral=False)
 
-
 class SborView(View):
     def __init__(self, game_name: str):
         super().__init__(timeout=None)
@@ -632,12 +624,8 @@ class SborView(View):
         await interaction.message.edit(embed=embed)
         await interaction.response.send_message("✅ Ты записан в состав!", ephemeral=True)
 
-
-# --- РУССКОЯЗЫЧНЫЕ КОМАНДЫ ---
-
-@bot.command(name="команды", aliases=["help", "помощь"])
+@bot.command(name="команды", aliases=["помощь", "commands"])
 async def commands_list(ctx):
-    # Проверяем, есть ли у пользователя права администратора/модератора
     is_staff = any(role.name in ["⚡ Штурмфюрер", "👁️ Смотрящий"] for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
 
     embed = discord.Embed(
@@ -646,7 +634,6 @@ async def commands_list(ctx):
         color=0x8B0000
     )
 
-    # Общие команды для всех
     general_cmds = (
         "`!профиль` (или `!ур`) — Показать твой уровень, звание и опыт.\n"
         "`!топ` (или `!лидеры`) — Таблица топ-10 игроков сервера.\n"
@@ -657,7 +644,6 @@ async def commands_list(ctx):
     )
     embed.add_field(name="⭐ Игровые и общие команды", value=general_cmds, inline=False)
 
-    # Админ/модер команды (показываются только если есть права)
     if is_staff:
         staff_cmds = (
             "`!хаб` — Отправить интерактивную панель управления.\n"
@@ -676,12 +662,9 @@ async def commands_list(ctx):
     try:
         await ctx.author.send(embed=embed)
         await ctx.message.delete()
-        # Уведомление в чате, что справка отправлена в ЛС
-        temp_msg = await ctx.send(f"📬 {ctx.author.mention}, список доступных команд отправлен тебе в личные сообщения!", delete_after=6)
+        await ctx.send(f"📬 {ctx.author.mention}, список доступных команд отправлен тебе в личные сообщения!", delete_after=6)
     except discord.Forbidden:
-        # Если у юзера закрыты ЛС, выводим прямо в канал
         await ctx.send(f"⚠️ {ctx.author.mention}, у тебя закрыты личные сообщения! Открой их, чтобы получать справку, либо смотри сюда:", embed=embed)
-
 
 @bot.command(name="хаб", aliases=["hub"])
 @commands.has_permissions(administrator=True)
@@ -697,7 +680,6 @@ async def hub(ctx):
         await ctx.message.delete()
     except:
         pass
-
 
 @bot.command(name="ежедневка", aliases=["daily", "бонус"])
 async def daily(ctx):
@@ -723,7 +705,6 @@ async def daily(ctx):
 
     update_user_full(user_id, new_exp, level, today)
     await ctx.send(msg)
-
 
 @bot.command(name="казино", aliases=["roll", "кости", "рулетка"])
 async def roll(ctx, bet: int = 50):
@@ -757,7 +738,6 @@ async def roll(ctx, bet: int = 50):
     update_user_data(user_id, exp, level)
     await ctx.send(f"{ctx.author.mention}\n{result}")
 
-
 @bot.command(name="профиль", aliases=["lvl", "ур"])
 async def lvl(ctx, member: discord.Member = None):
     target = member or ctx.author
@@ -782,7 +762,6 @@ async def lvl(ctx, member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
-
 @bot.command(name="топ", aliases=["top", "лидеры"])
 async def top(ctx):
     conn = sqlite3.connect(DB_FILE)
@@ -802,7 +781,6 @@ async def top(ctx):
     embed.set_footer(text="ПРАЧКА ДРАЧКА • Таблица лидеров")
     await ctx.send(embed=embed)
 
-
 @bot.command(name="колесо", aliases=["wheel"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def wheel(ctx):
@@ -819,7 +797,6 @@ async def wheel(ctx):
         await ctx.message.delete()
     except:
         pass
-
 
 @bot.command(name="дуэль", aliases=["duel", "драка", "махач"])
 async def duel(ctx, member: discord.Member, bet: int = 50):
@@ -963,7 +940,6 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
     embed.description = "\n".join(round_logs) + f"\n\n-------------------\n{result_text}"
     await msg.edit(content=None, embed=embed, view=None)
 
-
 @bot.command(name="настройка", aliases=["setup"])
 @commands.has_permissions(administrator=True)
 async def setup(ctx):
@@ -1009,7 +985,6 @@ async def setup(ctx):
         "✅ Всё готово! Сервер полностью укомплектован под совместные катки."
     )
 
-
 @bot.command(name="сбор", aliases=["call"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def сбор(ctx, *, game_name: str = "в катку"):
@@ -1037,7 +1012,6 @@ async def сбор(ctx, *, game_name: str = "в катку"):
     except:
         pass
 
-
 @bot.command(name="очистить", aliases=["clear"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def clear(ctx, amount: int = 10):
@@ -1048,7 +1022,6 @@ async def clear(ctx, amount: int = 10):
             f"🧹 **[ОЧИСТКА]** В канале {ctx.channel.mention} стерто {amount}"
             f" сообщений ({ctx.author.mention})."
         )
-
 
 @bot.command(name="мут", aliases=["mute"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
@@ -1072,7 +1045,6 @@ async def mute(
     except Exception as e:
         await ctx.send(f"Не удалось выдать мут: {e}", delete_after=5)
 
-
 @bot.command(name="кик", aliases=["kick"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def kick(ctx, member: discord.Member, *, reason="Нарушение правил"):
@@ -1088,7 +1060,6 @@ async def kick(ctx, member: discord.Member, *, reason="Нарушение пра
             )
     except Exception as e:
         await ctx.send(f"Не удалось кикнуть: {e}", delete_after=5)
-
 
 @bot.command(name="секрет", aliases=["secret"])
 async def secret(ctx):
@@ -1124,7 +1095,6 @@ async def secret(ctx):
         await ctx.message.delete()
     except:
         pass
-
 
 if __name__ == "__main__":
     token = os.getenv("TOKEN")

@@ -3,6 +3,7 @@ import os
 import asyncio
 import random
 import time
+import sqlite3
 import discord
 from discord.ext import commands, tasks
 from aiohttp import web
@@ -10,12 +11,51 @@ from aiohttp import web
 intents = discord.Intents.default()
 intents.guilds = True
 intents.message_content = True
-intents.members = True  # Обязательно для выдачи ролей и пингов
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Словарь опыта: {user_id: {"exp": 0, "level": 1}}
-users_exp = {}
+# Инициализация базы данных SQLite
+DB_FILE = "bot_database.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            exp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# Функции работы с базой данных
+def get_user_data(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT exp, level FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"exp": row[0], "level": row[1]}
+    return {"exp": 0, "level": 1}
+
+def update_user_data(user_id, exp, level):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO users (user_id, exp, level) 
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET 
+            exp = excluded.exp, 
+            level = excluded.level
+    """, (user_id, exp, level))
+    conn.commit()
+    conn.close()
 
 # Словарь для отслеживания кулдаунов (больница / бар): {user_id: {"time": timestamp, "status": "hospital"/"bar"}}
 cooldowns = {}
@@ -196,48 +236,49 @@ async def voice_exp_loop():
                     continue
 
                 user_id = member.id
-                if user_id not in users_exp:
-                    users_exp[user_id] = {"exp": 0, "level": 1}
+                data = get_user_data(user_id)
+                exp = data["exp"] + 3
+                level = data["level"]
 
-                users_exp[user_id]["exp"] += 3
+                exp_needed = level * 100
 
-                current_level = users_exp[user_id]["level"]
-                exp_needed = current_level * 100
-
-                if users_exp[user_id]["exp"] >= exp_needed:
-                    users_exp[user_id]["level"] += 1
-                    users_exp[user_id]["exp"] -= exp_needed
-                    new_lvl = users_exp[user_id]["level"]
-                    rank_title = get_rank_title(new_lvl)
+                if exp >= exp_needed:
+                    level += 1
+                    exp -= exp_needed
+                    rank_title = get_rank_title(level)
                     
                     channel = discord.utils.get(guild.text_channels, name="💬-флудилка")
                     if channel:
                         await channel.send(
-                            f"🎉 {member.mention} поднял уровень за активность в войсе! Теперь у него **LVL {new_lvl}** *({rank_title})*!"
+                            f"🎉 {member.mention} поднял уровень за активность в войсе! Теперь у него **LVL {level}** *({rank_title})*!"
                         )
+                
+                update_user_data(user_id, exp, level)
 
 
 # Фоновая задача: раз в сутки автоматически постит топ игроков в флудилку
 @tasks.loop(hours=24)
 async def auto_leaderboard():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, exp, level FROM users ORDER BY level DESC, exp DESC LIMIT 10")
+    top_rows = cursor.fetchall()
+    conn.close()
+
+    if not top_rows:
+        return
+
     for guild in bot.guilds:
         channel = discord.utils.get(guild.text_channels, name="💬-флудилка")
-        if not channel or not users_exp:
+        if not channel:
             continue
 
-        sorted_users = sorted(
-            users_exp.items(), 
-            key=lambda x: (x[1]["level"], x[1]["exp"]), 
-            reverse=True
-        )
-
         desc = ""
-        for index, (uid, data) in enumerate(sorted_users[:10], start=1):
+        for index, (uid, exp, lvl) in enumerate(top_rows, start=1):
             member = guild.get_member(uid)
             name = member.display_name if member else "Боец"
-            lvl = data['level']
             rank_title = get_rank_title(lvl)
-            desc += f"**{index}.** {name} — **LVL {lvl}** *({rank_title})* (`{data['exp']} XP`)\n"
+            desc += f"**{index}.** {name} — **LVL {lvl}** *({rank_title})* (`{exp} XP`)\n"
 
         embed = discord.Embed(
             title="🏆 ТАБЛИЦА РАНГОВ СЕРВЕРА",
@@ -282,23 +323,21 @@ async def on_message(message):
         return
 
     user_id = message.author.id
-    if user_id not in users_exp:
-        users_exp[user_id] = {"exp": 0, "level": 1}
+    data = get_user_data(user_id)
+    exp = data["exp"] + 15
+    level = data["level"]
 
-    users_exp[user_id]["exp"] += 15
+    exp_needed = level * 100
 
-    current_level = users_exp[user_id]["level"]
-    exp_needed = current_level * 100
-
-    if users_exp[user_id]["exp"] >= exp_needed:
-        users_exp[user_id]["level"] += 1
-        users_exp[user_id]["exp"] -= exp_needed
-        new_lvl = users_exp[user_id]["level"]
-        rank_title = get_rank_title(new_lvl)
+    if exp >= exp_needed:
+        level += 1
+        exp -= exp_needed
+        rank_title = get_rank_title(level)
         await message.channel.send(
-            f"🎉 {message.author.mention} повысил квалификацию! Теперь у него **LVL {new_lvl}** *({rank_title})*!"
+            f"🎉 {message.author.mention} повысил квалификацию! Теперь у него **LVL {level}** *({rank_title})*!"
         )
 
+    update_user_data(user_id, exp, level)
     await bot.process_commands(message)
 
 
@@ -306,7 +345,7 @@ async def on_message(message):
 @bot.command(name="lvl")
 async def lvl(ctx, member: discord.Member = None):
     target = member or ctx.author
-    user_data = users_exp.get(target.id, {"exp": 0, "level": 1})
+    user_data = get_user_data(target.id)
 
     current_lvl = user_data["level"]
     current_exp = user_data["exp"]
@@ -360,11 +399,14 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
         await ctx.send(f"⏳ {member.mention} сейчас занят — {reason} (еще ~{left} мин.). Не трогай калеку.", delete_after=7)
         return
 
-    if user.id not in users_exp or users_exp[user.id]["exp"] < bet:
+    user_data = get_user_data(user.id)
+    member_data = get_user_data(member.id)
+
+    if user_data["exp"] < bet:
         await ctx.send(f"⚠️ {user.mention}, у тебя не хватает опыта (`{bet} XP`), чтобы вывозить этот базар!", delete_after=7)
         return
 
-    if member.id not in users_exp or users_exp[member.id]["exp"] < bet:
+    if member_data["exp"] < bet:
         await ctx.send(f"⚠️ У {member.mention} пустые карманы, у него нет столько опыта для ставки!", delete_after=7)
         return
 
@@ -404,9 +446,15 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
     
     if user_score > member_score:
         winner, loser = user, member
-        users_exp[winner.id]["exp"] += bet
-        users_exp[loser.id]["exp"] -= bet
-        if users_exp[loser.id]["exp"] < 0: users_exp[loser.id]["exp"] = 0
+        w_data = user_data
+        l_data = member_data
+        
+        w_data["exp"] += bet
+        l_data["exp"] -= bet
+        if l_data["exp"] < 0: l_data["exp"] = 0
+
+        update_user_data(winner.id, w_data["exp"], w_data["level"])
+        update_user_data(loser.id, l_data["exp"], l_data["level"])
         
         cooldowns[loser.id] = {"time": now + 600, "status": "hospital"}
         cooldowns[winner.id] = {"time": now + 300, "status": "bar"}
@@ -419,9 +467,15 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
         )
     elif member_score > user_score:
         winner, loser = member, user
-        users_exp[winner.id]["exp"] += bet
-        users_exp[loser.id]["exp"] -= bet
-        if users_exp[loser.id]["exp"] < 0: users_exp[loser.id]["exp"] = 0
+        w_data = member_data
+        l_data = user_data
+
+        w_data["exp"] += bet
+        l_data["exp"] -= bet
+        if l_data["exp"] < 0: l_data["exp"] = 0
+
+        update_user_data(winner.id, w_data["exp"], w_data["level"])
+        update_user_data(loser.id, l_data["exp"], l_data["level"])
 
         cooldowns[loser.id] = {"time": now + 600, "status": "hospital"}
         cooldowns[winner.id] = {"time": now + 300, "status": "bar"}

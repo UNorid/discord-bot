@@ -6,6 +6,7 @@ import time
 import sqlite3
 import discord
 from discord.ext import commands, tasks
+from discord.ui import View, Button
 from aiohttp import web
 
 intents = discord.Intents.default()
@@ -25,7 +26,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             exp INTEGER DEFAULT 0,
-            level INTEGER DEFAULT 1
+            level INTEGER DEFAULT 1,
+            last_daily TEXT DEFAULT '2000-01-01'
         )
     """)
     conn.commit()
@@ -37,30 +39,35 @@ init_db()
 def get_user_data(user_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT exp, level FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT exp, level, last_daily FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
-        return {"exp": row[0], "level": row[1]}
-    return {"exp": 0, "level": 1}
+        return {"exp": row[0], "level": row[1], "last_daily": row[2]}
+    return {"exp": 0, "level": 1, "last_daily": "2000-01-01"}
 
-def update_user_data(user_id, exp, level):
+def update_user_full(user_id, exp, level, last_daily):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO users (user_id, exp, level) 
-        VALUES (?, ?, ?)
+        INSERT INTO users (user_id, exp, level, last_daily) 
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET 
             exp = excluded.exp, 
-            level = excluded.level
-    """, (user_id, exp, level))
+            level = excluded.level,
+            last_daily = excluded.last_daily
+    """, (user_id, exp, level, last_daily))
     conn.commit()
     conn.close()
 
-# Словарь для отслеживания кулдаунов (больница / бар): {user_id: {"time": timestamp, "status": "hospital"/"bar"}}
+def update_user_data(user_id, exp, level):
+    data = get_user_data(user_id)
+    update_user_full(user_id, exp, level, data["last_daily"])
+
+# Словарь для отслеживания кулдаунов дуэлей/больницы: {user_id: {"time": timestamp, "status": "hospital"/"bar"}}
 cooldowns = {}
 
-# Функция для получения названия ранга по уровню (все 100 уровней)
+# Функция для получения названия ранга по уровню
 def get_rank_title(level):
     if level >= 90:
         return "👑 Легенда"
@@ -188,7 +195,7 @@ SERVER_STRUCTURE = {
 }
 
 
-# Функция обновления интерактивного статуса
+# Обновление интерактивного статуса
 async def update_server_status(guild):
     gaming_vc = discord.utils.get(guild.voice_channels, name="🎮 ИГРУЛИ")
     main_vc = discord.utils.get(guild.voice_channels, name="🔥 Основной")
@@ -221,7 +228,7 @@ async def update_server_status(guild):
         )
 
 
-# Фоновая задача: начисление опыта за нахождение в голосовых каналах (каждую минуту)
+# Фоновая задача: начисление опыта за нахождение в голосовых каналах
 @tasks.loop(minutes=1)
 async def voice_exp_loop():
     for guild in bot.guilds:
@@ -256,7 +263,7 @@ async def voice_exp_loop():
                 update_user_data(user_id, exp, level)
 
 
-# Фоновая задача: раз в сутки автоматически постит топ игроков в флудилку
+# Фоновая задача: авто-топ раз в сутки
 @tasks.loop(hours=24)
 async def auto_leaderboard():
     conn = sqlite3.connect(DB_FILE)
@@ -341,6 +348,199 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
+# --- ИНТЕРАКТИВНЫЕ КНОПКИ ДЛЯ ХАБА И ДУЭЛЕЙ ---
+
+class HubView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📊 Профиль", style=discord.ButtonStyle.primary, custom_id="hub_profile")
+    async def profile_button(self, interaction: discord.Interaction, button: Button):
+        user_data = get_user_data(interaction.user.id)
+        current_lvl = user_data["level"]
+        current_exp = user_data["exp"]
+        exp_needed = current_lvl * 100
+        rank_title = get_rank_title(current_lvl)
+
+        embed = discord.Embed(
+            title=f"📊 Профиль: {interaction.user.name}",
+            color=0x8B0000,
+        )
+        embed.add_field(name="Звание / Титул", value=f"🛡️ **{rank_title}**", inline=False)
+        embed.add_field(name="Уровень", value=f"⭐ **LVL {current_lvl}**", inline=True)
+        embed.add_field(name="Опыт", value=f"💬 `{current_exp} / {exp_needed} XP`", inline=True)
+        embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else None)
+        embed.set_footer(text="ПРАЧКА ДРАЧКА • Интерактивный хаб")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🏆 Топ игроков", style=discord.ButtonStyle.success, custom_id="hub_top")
+    async def top_button(self, interaction: discord.Interaction, button: Button):
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, exp, level FROM users ORDER BY level DESC, exp DESC LIMIT 10")
+        top_rows = cursor.fetchall()
+        conn.close()
+
+        desc = ""
+        for index, (uid, exp, lvl) in enumerate(top_rows, start=1):
+            member = interaction.guild.get_member(uid)
+            name = member.display_name if member else "Боец"
+            rank_title = get_rank_title(lvl)
+            desc += f"**{index}.** {name} — **LVL {lvl}** *({rank_title})* (`{exp} XP`)\n"
+
+        embed = discord.Embed(title="🏆 ТОП-10 БОЙЦОВ СЕРВЕРА", description=desc or "Пока пусто.", color=0x8B0000)
+        embed.set_footer(text="ПРАЧКА ДРАЧКА • Таблица лидеров")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🎁 Ежедневка", style=discord.ButtonStyle.secondary, custom_id="hub_daily")
+    async def daily_button(self, interaction: discord.Interaction, button: Button):
+        user_id = interaction.user.id
+        data = get_user_data(user_id)
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+        if data["last_daily"] == today:
+            await interaction.response.send_message("⏳ Ты уже забрал свою ежедневную награду сегодня! Загляни завтра.", ephemeral=True)
+            return
+
+        reward = random.randint(50, 150)
+        new_exp = data["exp"] + reward
+        level = data["level"]
+        exp_needed = level * 100
+
+        msg = f"🎁 Ты успешно забрал ежедневный бонус и получил `+{reward} XP`!"
+        if new_exp >= exp_needed:
+            level += 1
+            new_exp -= exp_needed
+            rank_title = get_rank_title(level)
+            msg += f"\n🎉 Поздравляем с повышением уровня! Теперь у тебя **LVL {level}** *({rank_title})*!"
+
+        update_user_full(user_id, new_exp, level, today)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+class DuelAcceptView(View):
+    def __init__(self, challenger: discord.Member, target: discord.Member, bet: int):
+        super().__init__(timeout=30)
+        self.challenger = challenger
+        self.target = target
+        self.bet = bet
+        self.value = None
+
+    @discord.ui.button(label="⚔️ Принять вызов", style=discord.ButtonStyle.danger)
+    async def accept(self, interaction: discord.Interaction, button: Button):
+        if interaction.user != self.target:
+            await interaction.response.send_message("❌ Этот вызов брошен не тебе!", ephemeral=True)
+            return
+        self.value = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="❌ Отказаться", style=discord.ButtonStyle.secondary)
+    async def decline(self, interaction: discord.Interaction, button: Button):
+        if interaction.user != self.target:
+            await interaction.response.send_message("❌ Не лезь в чужой махач!", ephemeral=True)
+            return
+        self.value = False
+        self.stop()
+        await interaction.response.send_message(f"🛡️ {self.target.mention} благоразумно уклонился от драки.", ephemeral=False)
+
+
+class SborView(View):
+    def __init__(self, game_name: str):
+        super().__init__(timeout=None)
+        self.game_name = game_name
+        self.ready_users = set()
+
+    @discord.ui.button(label="🎮 Врываюсь в катку", style=discord.ButtonStyle.success, custom_id="sbor_join")
+    async def join_sbor(self, interaction: discord.Interaction, button: Button):
+        self.ready_users.add(interaction.user.display_name)
+        names = ", ".join(self.ready_users)
+        
+        embed = interaction.message.embeds[0]
+        embed.clear_fields()
+        embed.add_field(name="🛡️ Готовы ворваться:", value=names if names else "Никого", inline=False)
+        
+        await interaction.message.edit(embed=embed)
+        await interaction.response.send_message("✅ Ты записан в состав!", ephemeral=True)
+
+
+# --- КОМАНДЫ ---
+
+@bot.command(name="hub")
+@commands.has_permissions(administrator=True)
+async def hub(ctx):
+    embed = discord.Embed(
+        title="⚡ ПАНЕЛЬ УПРАВЛЕНИЯ БОЙЦА",
+        description="Используй кнопки ниже, чтобы быстро управлять профилем, смотреть топ или забирать ежедневные награды.",
+        color=0x8B0000
+    )
+    embed.set_footer(text="ПРАЧКА ДРАЧКА • Интерактивный терминал")
+    await ctx.send(embed=embed, view=HubView())
+    try:
+        await ctx.message.delete()
+    except:
+        pass
+
+
+@bot.command(name="daily")
+async def daily(ctx):
+    user_id = ctx.author.id
+    data = get_user_data(user_id)
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    if data["last_daily"] == today:
+        await ctx.send(f"⏳ {ctx.author.mention}, ты уже забирал бонус сегодня. Приходи завтра!", delete_after=7)
+        return
+
+    reward = random.randint(50, 150)
+    new_exp = data["exp"] + reward
+    level = data["level"]
+    exp_needed = level * 100
+
+    msg = f"🎁 {ctx.author.mention}, ежедневный бонус забран: `+{reward} XP`!"
+    if new_exp >= exp_needed:
+        level += 1
+        new_exp -= exp_needed
+        rank_title = get_rank_title(level)
+        msg += f"\n🎉 Новый уровень! Теперь у тебя **LVL {level}** *({rank_title})*!"
+
+    update_user_full(user_id, new_exp, level, today)
+    await ctx.send(msg)
+
+
+@bot.command(name="roll", aliases=["casino", "кости", "рулетка"])
+async def roll(ctx, bet: int = 50):
+    user_id = ctx.author.id
+    data = get_user_data(user_id)
+
+    if bet < 10 or bet > 500:
+        await ctx.send(f"⚠️ {ctx.author.mention}, ставка в казино должна быть от **10** до **500 XP**!", delete_after=7)
+        return
+
+    if data["exp"] < bet:
+        await ctx.send(f"⚠️ {ctx.author.mention}, у тебя недостаточно опыта (`{bet} XP`) для игры в казино!", delete_after=7)
+        return
+
+    user_roll = random.randint(1, 6) + random.randint(1, 6)
+    bot_roll = random.randint(1, 6) + random.randint(1, 6)
+
+    exp = data["exp"]
+    level = data["level"]
+
+    if user_roll > bot_roll:
+        exp += bet
+        result = f"🎰 **Казино:** Ты выбросил `{user_roll}`, бот — `{bot_roll}`.\n🏆 Победа! Ты выигрываешь `+{bet} XP`!"
+    elif user_roll < bot_roll:
+        exp -= bet
+        if exp < 0: exp = 0
+        result = f"🎰 **Казино:** Ты выбросил `{user_roll}`, бот — `{bot_roll}`.\n💥 Проигрыш! Ты теряешь `-{bet} XP`."
+    else:
+        result = f"🎰 **Казино:** Ничья на кубиках (`{user_roll}:{bot_roll}`). Ставка возвращена на баланс."
+
+    update_user_data(user_id, exp, level)
+    await ctx.send(f"{ctx.author.mention}\n{result}")
+
+
 # Команда проверки профиля и уровня
 @bot.command(name="lvl")
 async def lvl(ctx, member: discord.Member = None):
@@ -367,7 +567,7 @@ async def lvl(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
-# Уличный турнир / Дуэли (Bo3, ставки 10-500 XP, больница/бар)
+# Уличный турнир / Дуэли с кнопкой подтверждения
 @bot.command(name="duel", aliases=["дуэль", "драка", "махач"])
 async def duel(ctx, member: discord.Member, bet: int = 50):
     user = ctx.author
@@ -408,6 +608,26 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
 
     if member_data["exp"] < bet:
         await ctx.send(f"⚠️ У {member.mention} пустые карманы, у него нет столько опыта для ставки!", delete_after=7)
+        return
+
+    # Отправляем сообщение с кнопкой принятия вызова
+    view = DuelAcceptView(challenger=user, target=member, bet=bet)
+    msg = await ctx.send(f"⚔️ {member.mention}, тебе бросил вызов на уличный замес боец {user.mention}!\n💰 **Ставка:** `{bet} XP`.\nПримешь вызов?", view=view)
+    
+    await view.wait()
+
+    if view.value is None:
+        await msg.edit(content=f"⌛ Время вызова истекло. {member.mention} проигнорировал махач.", view=None)
+        return
+    elif view.value is False:
+        await msg.edit(content=f"🛡️ {member.mention} отказался от драки.", view=None)
+        return
+
+    # Перепроверяем баланс перед началом боя
+    user_data = get_user_data(user.id)
+    member_data = get_user_data(member.id)
+    if user_data["exp"] < bet or member_data["exp"] < bet:
+        await msg.edit(content="❌ У кого-то из участников внезапно не хватило опыта на балансе для проведения боя!", view=None)
         return
 
     round_phrases = [
@@ -490,7 +710,7 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
         result_text = f"🤝 Плотная ничья по итогам раундов (`{user_score}:{member_score}`). Никто не пострадал, разойдитесь по домам."
 
     embed.description = "\n".join(round_logs) + f"\n\n-------------------\n{result_text}"
-    await ctx.send(embed=embed)
+    await msg.edit(content=None, embed=embed, view=None)
 
 
 @bot.command()
@@ -539,7 +759,7 @@ async def setup(ctx):
     )
 
 
-# Команда быстрого сбора состава
+# Команда быстрого сбора состава с кнопкой записи
 @bot.command()
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def сбор(ctx, *, game_name: str = "в катку"):
@@ -554,12 +774,14 @@ async def сбор(ctx, *, game_name: str = "в катку"):
         ),
         color=0x8B0000,
     )
+    embed.add_field(name="🛡️ Готовы ворваться:", value="Никого", inline=False)
     embed.set_footer(text="Дисциплина — залог победы.")
 
     news_channel = discord.utils.get(ctx.guild.text_channels, name="📢-новости")
     target_channel = news_channel if news_channel else ctx.channel
 
-    await target_channel.send(content=role_mention, embed=embed)
+    view = SborView(game_name)
+    await target_channel.send(content=role_mention, embed=embed, view=view)
     try:
         await ctx.message.delete()
     except:

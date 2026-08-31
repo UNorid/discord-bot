@@ -6,7 +6,7 @@ import time
 import sqlite3
 import discord
 from discord.ext import commands, tasks
-from discord.ui import View, Button
+from discord.ui import View, Button, Modal, TextInput
 from aiohttp import web
 
 intents = discord.Intents.default()
@@ -28,6 +28,13 @@ def init_db():
             exp INTEGER DEFAULT 0,
             level INTEGER DEFAULT 1,
             last_daily TEXT DEFAULT '2000-01-01'
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS temp_roles (
+            user_id INTEGER PRIMARY KEY,
+            role_id INTEGER,
+            expires_at TEXT
         )
     """)
     conn.commit()
@@ -64,7 +71,7 @@ def update_user_data(user_id, exp, level):
     data = get_user_data(user_id)
     update_user_full(user_id, exp, level, data["last_daily"])
 
-# Словарь для отслеживания кулдаунов дуэлей/больницы: {user_id: {"time": timestamp, "status": "hospital"/"bar"}}
+# Словарь для отслеживания кулдаунов дуэлей/больницы
 cooldowns = {}
 
 # Функция для получения названия ранга по уровню
@@ -135,7 +142,7 @@ SERVER_STRUCTURE = {
             "name": "📜-правила",
             "type": "text",
             "desc": (
-                "**Свои правила для своих:**\n\n1. Уважение в катах и"
+                "**Свои правила для своих:**\n\n1. Уважение в катках и"
                 " чате.\n2. Никакого токсичного мусора.\n*Залетел — играй"
                 " до конца.*"
             ),
@@ -246,7 +253,6 @@ async def voice_exp_loop():
                 data = get_user_data(user_id)
                 exp = data["exp"] + 3
                 level = data["level"]
-
                 exp_needed = level * 100
 
                 if exp >= exp_needed:
@@ -261,6 +267,31 @@ async def voice_exp_loop():
                         )
                 
                 update_user_data(user_id, exp, level)
+
+
+# Фоновая задача: очистка просроченных временных ролей
+@tasks.loop(minutes=1)
+async def temp_roles_check():
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, role_id FROM temp_roles WHERE expires_at <= ?", (now_str,))
+    expired = cursor.fetchall()
+
+    for uid, role_id in expired:
+        for guild in bot.guilds:
+            member = guild.get_member(uid)
+            if member:
+                role = guild.get_role(role_id)
+                if role:
+                    try:
+                        await role.delete(reason="Срок временной роли колеса фортуны истек")
+                    except:
+                        pass
+        cursor.execute("DELETE FROM temp_roles WHERE user_id = ?", (uid,))
+    
+    conn.commit()
+    conn.close()
 
 
 # Фоновая задача: авто-топ раз в сутки
@@ -304,6 +335,8 @@ async def on_ready():
         auto_leaderboard.start()
     if not voice_exp_loop.is_running():
         voice_exp_loop.start()
+    if not temp_roles_check.is_running():
+        temp_roles_check.start()
     for guild in bot.guilds:
         await update_server_status(guild)
 
@@ -333,7 +366,6 @@ async def on_message(message):
     data = get_user_data(user_id)
     exp = data["exp"] + 15
     level = data["level"]
-
     exp_needed = level * 100
 
     if exp >= exp_needed:
@@ -348,7 +380,144 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
-# --- ИНТЕРАКТИВНЫЕ КНОПКИ ДЛЯ ХАБА И ДУЭЛЕЙ ---
+# --- ИНТЕРАКТИВНЫЕ МОДАЛЫ И КНОПКИ ---
+
+class CustomRoleModal(Modal, title="Настройка своей временной роли"):
+    role_name = TextInput(
+        label="Название роли",
+        placeholder="Например: Властелин дискорда",
+        max_length=30,
+    )
+    role_color = TextInput(
+        label="Цвет (HEX код, например #FF0000)",
+        placeholder="#FFD700",
+        max_length=7,
+        default="#FFD700"
+    )
+
+    def __init__(self, guild: discord.Guild, member: discord.Member):
+        super().__init__()
+        self.guild = guild
+        self.member = member
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        color_str = self.role_color.value.strip()
+        try:
+            if not color_str.startswith("#"):
+                color_str = "#" + color_str
+            color_val = int(color_str.replace("#", ""), 16)
+            discord_color = discord.Color(color_val)
+        except ValueError:
+            discord_color = discord.Color.gold()
+
+        try:
+            new_role = await self.guild.create_role(
+                name=self.role_name.value,
+                color=discord_color,
+                hoist=True,
+                reason="Победитель Колеса Фортуны"
+            )
+            await self.member.add_roles(new_role)
+
+            expires = (datetime.datetime.now() + datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO temp_roles (user_id, role_id, expires_at)
+                VALUES (?, ?, ?)
+            """, (self.member.id, new_role.id, expires))
+            conn.commit()
+            conn.close()
+
+            await interaction.followup.send(f"✅ Роль **{self.role_name.value}** успешно создана и выдана тебе на 24 часа!", ephemeral=True)
+            
+            general_ch = discord.utils.get(self.guild.text_channels, name="💬-флудилка")
+            if general_ch:
+                await general_ch.send(f"👑 Колесо фортуны выбрало победителем игрока {self.member.mention}! Он забрал эксклюзивную роль **{self.role_name.value}** на 24 часа.")
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ошибка при создании роли: {e}", ephemeral=True)
+
+
+class FortuneWheelView(View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.guild = guild
+        self.participants = set()
+
+    @discord.ui.button(label="🎰 Участвовать в колесе", style=discord.ButtonStyle.success, custom_id="fortune_join")
+    async def join_wheel(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id in self.participants:
+            await interaction.response.send_message("Ты уже в списке участников этого розыгрыша!", ephemeral=True)
+            return
+        
+        self.participants.add(interaction.user.id)
+        await interaction.response.send_message("✅ Ты успешно залетел в колесо фортуны! Жди окончания розыгрыша.", ephemeral=True)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        
+        try:
+            # Проверка лимита: активных временных ролей должно быть не более 15% от состава сервера
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM temp_roles")
+            active_temp_count = cursor.fetchone()[0]
+            conn.close()
+
+            max_allowed = max(1, int(len(self.guild.members) * 0.15))
+
+            if active_temp_count >= max_allowed:
+                general_ch = discord.utils.get(self.guild.text_channels, name="💬-флудилка")
+                if general_ch:
+                    await general_ch.send("🎰 Колесо фортуны прокрутилось, но на сервере уже достигнут лимит временных элитных ролей (15%). Розыгрыш переносится!")
+                return
+
+            if self.participants:
+                winner_id = random.choice(list(self.participants))
+                winner_member = self.guild.get_member(winner_id)
+                if winner_member:
+                    try:
+                        dm_embed = discord.Embed(
+                            title="🎉 ПОЗДРАВЛЯЕМ С ПОБЕДОЙ!",
+                            description="Ты выиграл в **Колесе Фортуны**! Нажми на кнопку ниже, чтобы выбрать кастомное название и цвет своей временной роли на 24 часа.",
+                            color=0x8B0000
+                        )
+                        
+                        class SetupButtonView(View):
+                            def __init__(self, g, m):
+                                super().__init__(timeout=300)
+                                self.g = g
+                                self.m = m
+
+                            @discord.ui.button(label="🛠️ Настроить свою роль", style=discord.ButtonStyle.primary)
+                            async def setup_role_btn(self, inter: discord.Interaction, btn: Button):
+                                await inter.response.send_modal(CustomRoleModal(self.g, self.m))
+
+                        await winner_member.send(embed=dm_embed, view=SetupButtonView(self.guild, winner_member))
+                    except Exception:
+                        fallback_role = await self.guild.create_role(name="⭐ Счастливчик", color=discord.Color.gold(), hoist=True)
+                        await winner_member.add_roles(fallback_role)
+                        expires = (datetime.datetime.now() + datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+                        conn = sqlite3.connect(DB_FILE)
+                        cursor = conn.cursor()
+                        cursor.execute("INSERT OR REPLACE INTO temp_roles (user_id, role_id, expires_at) VALUES (?, ?, ?)", (winner_member.id, fallback_role.id, expires))
+                        conn.commit()
+                        conn.close()
+                        
+                        general_ch = discord.utils.get(self.guild.text_channels, name="💬-флудилка")
+                        if general_ch:
+                            await general_ch.send(f"👑 Колесо фортуны выбрало победителя: {winner_member.mention}! Он получает роль **⭐ Счастливчик**.")
+            else:
+                general_ch = discord.utils.get(self.guild.text_channels, name="💬-флудилка")
+                if general_ch:
+                    await general_ch.send("🎰 Колесо фортуны завершилось, но никто не нажал кнопку участия. Ничья!")
+        except Exception as e:
+            print(f"Ошибка в колесе фортуны: {e}")
+
 
 class HubView(View):
     def __init__(self):
@@ -464,9 +633,57 @@ class SborView(View):
         await interaction.response.send_message("✅ Ты записан в состав!", ephemeral=True)
 
 
-# --- КОМАНДЫ ---
+# --- РУССКОЯЗЫЧНЫЕ КОМАНДЫ ---
 
-@bot.command(name="hub")
+@bot.command(name="команды", aliases=["help", "помощь"])
+async def commands_list(ctx):
+    # Проверяем, есть ли у пользователя права администратора/модератора
+    is_staff = any(role.name in ["⚡ Штурмфюрер", "👁️ Смотрящий"] for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
+
+    embed = discord.Embed(
+        title="📜 СПИСОК ДОСТУПНЫХ КОМАНД",
+        description="Вот всё, чем ты можешь пользоваться на сервере. Не забывай про префикс `!`",
+        color=0x8B0000
+    )
+
+    # Общие команды для всех
+    general_cmds = (
+        "`!профиль` (или `!ур`) — Показать твой уровень, звание и опыт.\n"
+        "`!топ` (или `!лидеры`) — Таблица топ-10 игроков сервера.\n"
+        "`!ежедневка` (или `!бонус`) — Забрать ежедневную награду (XP).\n"
+        "`!казино [ставка]` (или `!кости`) — Сыграть в кости на XP против бота (ставка от 10 до 500).\n"
+        "`!дуэль @Юзер [ставка]` (или `!махач`) — Устроить уличный замес на XP с другим бойцом.\n"
+        "`!команды` (или `!помощь`) — Вызвать это справочное меню в ЛС."
+    )
+    embed.add_field(name="⭐ Игровые и общие команды", value=general_cmds, inline=False)
+
+    # Админ/модер команды (показываются только если есть права)
+    if is_staff:
+        staff_cmds = (
+            "`!хаб` — Отправить интерактивную панель управления.\n"
+            "`!сбор [игра]` — Объявить общий сбор игроков (требуется роль Штурмфюрер/Смотрящий).\n"
+            "`!колесо` — Запустить Колесо Фортуны на розыгрыш временной роли (Штурмфюрер/Смотрящий).\n"
+            "`!очистить [кол-во]` — Удалить сообщения в канале.\n"
+            "`!мут @Юзер [мин] [причина]` — Отправить нарушителя в таймаут.\n"
+            "`!кик @Юзер [причина]` — Выгнать игрока с сервера.\n"
+            "`!настройка` — Полностью создать структуру каналов и ролей с нуля (Админ).\n"
+            "`!секрет` — Открыть доступ к скрытому бункеру (Штурмфюрер/Смотрящий)."
+        )
+        embed.add_field(name="🛡️ Команды руководства и модерации", value=staff_cmds, inline=False)
+
+    embed.set_footer(text="ПРАЧКА ДРАЧКА • Информационный терминал")
+
+    try:
+        await ctx.author.send(embed=embed)
+        await ctx.message.delete()
+        # Уведомление в чате, что справка отправлена в ЛС
+        temp_msg = await ctx.send(f"📬 {ctx.author.mention}, список доступных команд отправлен тебе в личные сообщения!", delete_after=6)
+    except discord.Forbidden:
+        # Если у юзера закрыты ЛС, выводим прямо в канал
+        await ctx.send(f"⚠️ {ctx.author.mention}, у тебя закрыты личные сообщения! Открой их, чтобы получать справку, либо смотри сюда:", embed=embed)
+
+
+@bot.command(name="хаб", aliases=["hub"])
 @commands.has_permissions(administrator=True)
 async def hub(ctx):
     embed = discord.Embed(
@@ -482,7 +699,7 @@ async def hub(ctx):
         pass
 
 
-@bot.command(name="daily")
+@bot.command(name="ежедневка", aliases=["daily", "бонус"])
 async def daily(ctx):
     user_id = ctx.author.id
     data = get_user_data(user_id)
@@ -508,7 +725,7 @@ async def daily(ctx):
     await ctx.send(msg)
 
 
-@bot.command(name="roll", aliases=["casino", "кости", "рулетка"])
+@bot.command(name="казино", aliases=["roll", "кости", "рулетка"])
 async def roll(ctx, bet: int = 50):
     user_id = ctx.author.id
     data = get_user_data(user_id)
@@ -541,8 +758,7 @@ async def roll(ctx, bet: int = 50):
     await ctx.send(f"{ctx.author.mention}\n{result}")
 
 
-# Команда проверки профиля и уровня
-@bot.command(name="lvl")
+@bot.command(name="профиль", aliases=["lvl", "ур"])
 async def lvl(ctx, member: discord.Member = None):
     target = member or ctx.author
     user_data = get_user_data(target.id)
@@ -567,8 +783,45 @@ async def lvl(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
-# Уличный турнир / Дуэли с кнопкой подтверждения
-@bot.command(name="duel", aliases=["дуэль", "драка", "махач"])
+@bot.command(name="топ", aliases=["top", "лидеры"])
+async def top(ctx):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, exp, level FROM users ORDER BY level DESC, exp DESC LIMIT 10")
+    top_rows = cursor.fetchall()
+    conn.close()
+
+    desc = ""
+    for index, (uid, exp, lvl) in enumerate(top_rows, start=1):
+        member = ctx.guild.get_member(uid)
+        name = member.display_name if member else "Боец"
+        rank_title = get_rank_title(lvl)
+        desc += f"**{index}.** {name} — **LVL {lvl}** *({rank_title})* (`{exp} XP`)\n"
+
+    embed = discord.Embed(title="🏆 ТОП-10 БОЙЦОВ СЕРВЕРА", description=desc or "Пока пусто.", color=0x8B0000)
+    embed.set_footer(text="ПРАЧКА ДРАЧКА • Таблица лидеров")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="колесо", aliases=["wheel"])
+@commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
+async def wheel(ctx):
+    embed = discord.Embed(
+        title="🎰 КОЛЕСО ФОРТУНЫ ЗАПУЩЕНО!",
+        description="Срочно жми на кнопку ниже, чтобы ворваться в розыгрыш эксклюзивной временной роли на 24 часа! Успей запрыгнуть, пока идет таймер (1 минута).",
+        color=0x8B0000
+    )
+    embed.set_footer(text="ПРАЧКА ДРАЧКА • Испытай удачу")
+    
+    view = FortuneWheelView(ctx.guild)
+    await ctx.send(embed=embed, view=view)
+    try:
+        await ctx.message.delete()
+    except:
+        pass
+
+
+@bot.command(name="дуэль", aliases=["duel", "драка", "махач"])
 async def duel(ctx, member: discord.Member, bet: int = 50):
     user = ctx.author
     now = time.time()
@@ -610,7 +863,6 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
         await ctx.send(f"⚠️ У {member.mention} пустые карманы, у него нет столько опыта для ставки!", delete_after=7)
         return
 
-    # Отправляем сообщение с кнопкой принятия вызова
     view = DuelAcceptView(challenger=user, target=member, bet=bet)
     msg = await ctx.send(f"⚔️ {member.mention}, тебе бросил вызов на уличный замес боец {user.mention}!\n💰 **Ставка:** `{bet} XP`.\nПримешь вызов?", view=view)
     
@@ -623,7 +875,6 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
         await msg.edit(content=f"🛡️ {member.mention} отказался от драки.", view=None)
         return
 
-    # Перепроверяем баланс перед началом боя
     user_data = get_user_data(user.id)
     member_data = get_user_data(member.id)
     if user_data["exp"] < bet or member_data["exp"] < bet:
@@ -713,7 +964,7 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
     await msg.edit(content=None, embed=embed, view=None)
 
 
-@bot.command()
+@bot.command(name="настройка", aliases=["setup"])
 @commands.has_permissions(administrator=True)
 async def setup(ctx):
     guild = ctx.guild
@@ -759,8 +1010,7 @@ async def setup(ctx):
     )
 
 
-# Команда быстрого сбора состава с кнопкой записи
-@bot.command()
+@bot.command(name="сбор", aliases=["call"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def сбор(ctx, *, game_name: str = "в катку"):
     role = discord.utils.get(ctx.guild.roles, name="🎮 Боевой товарищ")
@@ -788,14 +1038,7 @@ async def сбор(ctx, *, game_name: str = "в катку"):
         pass
 
 
-@bot.command()
-@commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
-async def call(ctx, *, game_name: str = "в катку"):
-    await сбор(ctx, game_name=game_name)
-
-
-# Команды модерации
-@bot.command()
+@bot.command(name="очистить", aliases=["clear"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def clear(ctx, amount: int = 10):
     await ctx.channel.purge(limit=amount + 1)
@@ -807,7 +1050,7 @@ async def clear(ctx, amount: int = 10):
         )
 
 
-@bot.command()
+@bot.command(name="мут", aliases=["mute"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def mute(
     ctx, member: discord.Member, minutes: int = 10, *, reason="Не указана"
@@ -830,7 +1073,7 @@ async def mute(
         await ctx.send(f"Не удалось выдать мут: {e}", delete_after=5)
 
 
-@bot.command()
+@bot.command(name="кик", aliases=["kick"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def kick(ctx, member: discord.Member, *, reason="Нарушение правил"):
     try:
@@ -847,8 +1090,7 @@ async def kick(ctx, member: discord.Member, *, reason="Нарушение пра
         await ctx.send(f"Не удалось кикнуть: {e}", delete_after=5)
 
 
-# Пасхалка в бункер
-@bot.command()
+@bot.command(name="секрет", aliases=["secret"])
 async def secret(ctx):
     allowed_roles = ["⚡ Штурмфюрер", "👁️ Смотрящий"]
     has_access = any(role.name in allowed_roles for role in ctx.author.roles)
@@ -877,7 +1119,7 @@ async def secret(ctx):
             delete_after=10,
         )
     else:
-        await ctx.send("Сначала прожми `!setup`!", delete_after=5)
+        await ctx.send("Сначала прожми `!настройка`!", delete_after=5)
     try:
         await ctx.message.delete()
     except:

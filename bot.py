@@ -1,6 +1,8 @@
 import datetime
 import os
 import asyncio
+import random
+import time
 import discord
 from discord.ext import commands, tasks
 from aiohttp import web
@@ -14,6 +16,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Словарь опыта: {user_id: {"exp": 0, "level": 1}}
 users_exp = {}
+
+# Словарь для отслеживания кулдаунов (больница / бар): {user_id: {"time": timestamp, "status": "hospital"/"bar"}}
+cooldowns = {}
 
 # Функция для получения названия ранга по уровню (все 100 уровней)
 def get_rank_title(level):
@@ -181,14 +186,12 @@ async def update_server_status(guild):
 async def voice_exp_loop():
     for guild in bot.guilds:
         for vc in guild.voice_channels:
-            # Игнорируем АФК-канал и каналы, где человек сидит один
             if vc.name == "💀 АФК" or len(vc.members) < 2:
                 continue
             
             for member in vc.members:
                 if member.bot:
                     continue
-                # Если микрофон или звук выключены — очки не капают
                 if member.voice and (member.voice.self_mute or member.voice.self_deaf):
                     continue
 
@@ -219,10 +222,7 @@ async def voice_exp_loop():
 async def auto_leaderboard():
     for guild in bot.guilds:
         channel = discord.utils.get(guild.text_channels, name="💬-флудилка")
-        if not channel:
-            continue
-
-        if not users_exp:
+        if not channel or not users_exp:
             continue
 
         sorted_users = sorted(
@@ -251,7 +251,6 @@ async def auto_leaderboard():
 @bot.event
 async def on_ready():
     print(f"Бот {bot.user} в деле!")
-    # Запускаем веб-сервер в фоне для Render
     asyncio.create_task(start_web_server())
     if not auto_leaderboard.is_running():
         auto_leaderboard.start()
@@ -326,6 +325,117 @@ async def lvl(ctx, member: discord.Member = None):
     embed.set_thumbnail(url=target.avatar.url if target.avatar else None)
     embed.set_footer(text="ПРАЧКА ДРАЧКА • Система уровней")
 
+    await ctx.send(embed=embed)
+
+
+# Уличный турнир / Дуэли (Bo3, ставки 10-500 XP, больница/бар)
+@bot.command(name="duel", aliases=["дуэль", "драка", "махач"])
+async def duel(ctx, member: discord.Member, bet: int = 50):
+    user = ctx.author
+    now = time.time()
+
+    if member.bot:
+        await ctx.send("🤖 С железом воевать — себя не уважать. Зови живого бойца!", delete_after=5)
+        return
+    
+    if member == user:
+        await ctx.send("🤡 Сам с собой в зеркало захотел подраться? Охлади пыл.", delete_after=5)
+        return
+
+    if bet < 10 or bet > 500:
+        await ctx.send(f"⚠️ {user.mention}, ставка должна быть в пределах от **10** до **500 XP**!", delete_after=7)
+        return
+
+    if user.id in cooldowns and now < cooldowns[user.id]["time"]:
+        left = int((cooldowns[user.id]["time"] - now) / 60) + 1
+        status = cooldowns[user.id]["status"]
+        reason = "отлеживаешься в больнице после прошлых замесов" if status == "hospital" else "отдыхаешь в баре с пивом"
+        await ctx.send(f"⏳ {user.mention}, погоди! Ты сейчас {reason}. Еще примерно **{left} мин.** не до драк.", delete_after=7)
+        return
+
+    if member.id in cooldowns and now < cooldowns[member.id]["time"]:
+        left = int((cooldowns[member.id]["time"] - now) / 60) + 1
+        status = cooldowns[member.id]["status"]
+        reason = "валяется в больнице" if status == "hospital" else "отдыхает в баре"
+        await ctx.send(f"⏳ {member.mention} сейчас занят — {reason} (еще ~{left} мин.). Не трогай калеку.", delete_after=7)
+        return
+
+    if user.id not in users_exp or users_exp[user.id]["exp"] < bet:
+        await ctx.send(f"⚠️ {user.mention}, у тебя не хватает опыта (`{bet} XP`), чтобы вывозить этот базар!", delete_after=7)
+        return
+
+    if member.id not in users_exp or users_exp[member.id]["exp"] < bet:
+        await ctx.send(f"⚠️ У {member.mention} пустые карманы, у него нет столько опыта для ставки!", delete_after=7)
+        return
+
+    round_phrases = [
+        "прописывает сокрушительный лоу-кик в область печени!",
+        "исполняет жесткую вертуху из девяностых прямо в челюсть!",
+        "пробивает глухую защиту резким боковым ударом!",
+        "проводит молниеносный борцовский проход в две ноги!",
+        "врубает жесткий префаер и ловит оппонента на противоходе!",
+        "налетает с яростью бешеного пса и забивает у сетки!",
+        "ловко уворачивается от летящего кулака и контратакует в корпус!"
+    ]
+
+    user_score = 0
+    member_score = 0
+    round_logs = []
+
+    for round_num in range(1, 4):
+        if user_score == 2 or member_score == 2:
+            break
+
+        u_roll = random.randint(1, 100)
+        m_roll = random.randint(1, 100)
+
+        if u_roll > m_roll:
+            user_score += 1
+            action = random.choice(round_phrases)
+            round_logs.append(f"🥊 **Раунд {round_num}:** {user.mention} {action} *({user_score}:{member_score})*")
+        elif m_roll > u_roll:
+            member_score += 1
+            action = random.choice(round_phrases)
+            round_logs.append(f"💥 **Раунд {round_num}:** {member.mention} {action} *({user_score}:{member_score})*")
+        else:
+            round_logs.append(f"🤝 **Раунд {round_num}:** Обоюдный плотный обмен ударами, ничья в раунде! *({user_score}:{member_score})*")
+
+    embed = discord.Embed(title="⚔️ ПОДПОЛЬНЫЙ ТУРНИР: УЛИЧНЫЙ ЗАМЕС", color=0x8B0000)
+    
+    if user_score > member_score:
+        winner, loser = user, member
+        users_exp[winner.id]["exp"] += bet
+        users_exp[loser.id]["exp"] -= bet
+        if users_exp[loser.id]["exp"] < 0: users_exp[loser.id]["exp"] = 0
+        
+        cooldowns[loser.id] = {"time": now + 600, "status": "hospital"}
+        cooldowns[winner.id] = {"time": now + 300, "status": "bar"}
+
+        result_text = (
+            f"🏆 **Победитель серии:** {winner.mention} со счетом **{user_score}:{member_score}**!\n"
+            f"💰 Куш забран: `+{bet} XP`\n\n"
+            f"🚑 **{loser.mention}** отлетает в больницу на **10 минут**.\n"
+            f"🍻 **{winner.mention}** уходит в бар бухать на **5 минут** отмывать кровь."
+        )
+    elif member_score > user_score:
+        winner, loser = member, user
+        users_exp[winner.id]["exp"] += bet
+        users_exp[loser.id]["exp"] -= bet
+        if users_exp[loser.id]["exp"] < 0: users_exp[loser.id]["exp"] = 0
+
+        cooldowns[loser.id] = {"time": now + 600, "status": "hospital"}
+        cooldowns[winner.id] = {"time": now + 300, "status": "bar"}
+
+        result_text = (
+            f"🏆 **Победитель серии:** {winner.mention} оформляет камбэк со счетом **{member_score}:{user_score}**!\n"
+            f"💰 Куш забран: `+{bet} XP`\n\n"
+            f"🚑 **{loser.mention}** отлетает в больницу на **10 минут**.\n"
+            f"🍻 **{winner.mention}** уходит в бар отдыхать на **5 минут**."
+        )
+    else:
+        result_text = f"🤝 Плотная ничья по итогам раундов (`{user_score}:{member_score}`). Никто не пострадал, разойдитесь по домам."
+
+    embed.description = "\n".join(round_logs) + f"\n\n-------------------\n{result_text}"
     await ctx.send(embed=embed)
 
 

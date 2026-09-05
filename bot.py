@@ -1626,10 +1626,8 @@ async def secret(ctx):
 
 @bot.command(name="герой", aliases=["hero"])
 async def hero_info(ctx, *, hero_name: str):
-    # Уведомляем пользователя, что бот думает
     async with ctx.typing():
         try:
-            # 1. Делаем запрос к открытому API OpenDota за статистикой героев
             async with aiohttp.ClientSession() as session:
                 async with session.get("https://api.opendota.com/api/heroStats") as resp:
                     if resp.status != 200:
@@ -1637,7 +1635,6 @@ async def hero_info(ctx, *, hero_name: str):
                         return
                     heroes_data = await resp.json()
 
-            # 2. Ищем героя по имени (не боимся регистра букв благодаря .lower())
             target_hero = None
             for h in heroes_data:
                 if h.get("localized_name", "").lower() == hero_name.lower():
@@ -1645,43 +1642,34 @@ async def hero_info(ctx, *, hero_name: str):
                     break
 
             if not target_hero:
-                await ctx.send(f"❌ Герой **{hero_name}** не найден. Проверь правильность написания (например: `!герой Slark` или `!герой Сларк`).")
+                await ctx.send(f"❌ Герой **{hero_name}** не найден.")
                 return
 
-            # 3. Собираем красивый Embed
             embed = discord.Embed(
                 title=f"🛡️ Разбор героя: {target_hero['localized_name']}",
-                color=0x8B0000  # Твой эстетичный темно-красный цвет
+                color=0x8B0000
             )
 
-            # === ВОТ ТУТ САМЫЕ ГЛАВНЫЕ СТРОКИ С КАРТИНКОЙ ===
-            # OpenDota возвращает относительный путь (например, /apps/dota2/images/heroes/slark_full.png)
-            # Мы склеиваем его с базовым адресом сайта, чтобы получилась рабочая ссылка
-            image_url = f"https://api.opendota.com{target_hero['img']}"
-            embed.set_image(url=image_url)  # Добавляет большую красивую картинку по центру
-            # ===============================================
+            # ИСПРАВЛЕНИЕ ДЛЯ КАРТИНКИ:
+            # Поле 'name' возвращает значение вроде 'npc_dota_hero_muerta'. 
+            # Нам нужно убрать префикс 'npc_dota_hero_', чтобы получить просто 'muerta' для ссылки.
+            hero_code_name = target_hero.get('name', '').replace('npc_dota_hero_', '')
+            
+            # Собираем правильную ссылку на полный арт героя от Valve/OpenDota CDN
+            image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_code_name}_full.png"
+            embed.set_image(url=image_url)
 
-            # 4. Достаем базовые цифры из ответа API
-            # Переводим атрибуты в красивый вид
             attr_map = {"str": "Сила 💪", "agi": "Ловкость 🏃‍♂️", "int": "Интеллект 🧠", "all": "Универсальный ✨"}
             primary_attr = attr_map.get(target_hero.get('primary_attr'), "Неизвестно")
-            
-            # Считаем примерный винрейт в пабликах (берем матчи и победы на высоком MMR если доступны, либо общие)
-            # У OpenDota в heroStats есть поля pro_win/pro_pick или общая статистика
-            base_hp = target_hero.get('base_health', 600)
 
-            # Добавляем текстовые поля в карточку
             embed.add_field(name="Основной атрибут", value=primary_attr, inline=True)
             embed.add_field(name="Атакующий тип", value=target_hero.get('attack_type', 'Неизвестно'), inline=True)
-            
-            # Выводим ID героя просто для справки
-            embed.set_footer(text=f"ID героя в системе Dota 2: {target_hero.get('id')}")
+            embed.set_footer(text=f"ID героя: {target_hero.get('id')}")
 
-            # 5. Отправляем готовую карточку в чат
             await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"⚠️ Произошла ошибка при обработке запроса: `{e}`")
+            await ctx.send(f"⚠️ Ошибка: `{e}`")
 
 if __name__ == "__main__":
     token = os.getenv("TOKEN")

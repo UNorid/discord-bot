@@ -1919,7 +1919,11 @@ async def start_web_server():
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+    try:
+        await site.start()
+        print(f"Веб-сервер успешно запущен на порту {port}")
+    except OSError:
+        print(ранее запущенный процесс уже занял порт {port}, пропускаем...)
 
 # Запускаем бота и веб-сервер через кастомный метод main без лишних дублей
 async def main():

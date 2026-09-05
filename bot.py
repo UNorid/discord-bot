@@ -1956,9 +1956,25 @@ async def counter_command(ctx, hero_name: str, *, enemies_str: str):
         except Exception as e:
             await ctx.send(f"⚠️ Ошибка при обращении к Gemini API: `{e}`")
             
+# Добавь этот код перед запуском бота, чтобы Render видел открытый порт
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+# А в блоке запуска перепиши так:
 if __name__ == "__main__":
-    token = os.getenv("TOKEN")
+    token = os.environ.get("DISCORD_TOKEN")
     if not token:
-        print("Ошибка: Токен не найден в переменных окружения TOKEN!")
+        print("Ошибка: Токен не найден в переменных окружения DISCORD_TOKEN!")
     else:
+        loop = asyncio.get_event_loop()
+        loop.create_task(start_web_server())
         bot.run(token)

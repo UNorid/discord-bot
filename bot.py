@@ -1634,6 +1634,7 @@ async def hero_command(ctx, *, hero_query: str):
     async with ctx.typing():
         try:
             async with aiohttp.ClientSession() as session:
+                # Получаем общую статистику героев
                 async with session.get("https://api.opendota.com/api/heroStats") as resp:
                     if resp.status != 200:
                         await ctx.send("❌ Не удалось получить данные от OpenDota.")
@@ -1650,8 +1651,16 @@ async def hero_command(ctx, *, hero_query: str):
                 await ctx.send(f"❌ Герой **{hero_query}** не найден.")
                 return
 
+            hero_id = target_hero.get('id')
             hero_name_clean = target_hero.get('name', '').replace('npc_dota_hero_', '')
             image_url = f"https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/{hero_name_clean}.png"
+
+            # Подтягиваем популярные предметы для конкретного героя через отдельный эндпоинт OpenDota
+            items_data = {}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://api.opendota.com/api/heroes/{hero_id}/itemPopularity") as item_resp:
+                    if item_resp.status == 200:
+                        items_data = await item_resp.json()
 
             embed = discord.Embed(
                 title=f"🛡️ Разбор героя: {target_hero['localized_name']}",
@@ -1662,31 +1671,35 @@ async def hero_command(ctx, *, hero_query: str):
             attr_map = {"str": "Сила 💪", "agi": "Ловкость 🏃‍♂️", "int": "Интеллект 🧠", "all": "Универсальный ✨"}
             primary_attr = attr_map.get(target_hero.get('primary_attr'), "Неизвестно")
 
+            # Статистика матчей/винрейта
             pro_pick = target_hero.get('pro_pick', 0)
-            pro_win = target_hero.get('pro_win', 0)
             pro_ban = target_hero.get('pro_ban', 0)
             
-            pub_pick = (target_hero.get('1_pick', 0) + target_hero.get('2_pick', 0) + 
-                        target_hero.get('3_pick', 0) + target_hero.get('4_pick', 0) + 
-                        target_hero.get('5_pick', 0) + target_hero.get('6_pick', 0) + 
-                        target_hero.get('7_pick', 0) + target_hero.get('8_pick', 0))
-            
-            pub_win = (target_hero.get('1_win', 0) + target_hero.get('2_win', 0) + 
-                       target_hero.get('3_win', 0) + target_hero.get('4_win', 0) + 
-                       target_hero.get('5_win', 0) + target_hero.get('6_win', 0) + 
-                       target_hero.get('7_win', 0) + target_hero.get('8_win', 0))
-
+            pub_pick = sum(target_hero.get(f'{i}_pick', 0) for i in range(1, 9))
+            pub_win = sum(target_hero.get(f'{i}_win', 0) for i in range(1, 9))
             pub_winrate = f"{(pub_win / pub_pick * 100):.1f}%" if pub_pick > 0 else "Нет данных"
+
+            # Лучшие позиции (роли) по версии OpenDota (учитывает ранги от 1 до 5)
+            roles_dict = target_hero.get('roles', [])
+            roles_str = ", ".join(roles_dict) if roles_dict else "Универсал"
+
+            # Вытаскиваем топ предметов из ответа itemPopularity (например, ранние/основные предметы)
+            early_items = list(items_data.get('early_game', {}).keys())[:3]
+            core_items = list(items_data.get('mid_game', {}).keys())[:3]
+            
+            items_text = f"🔹 **Ранние:** {', '.join(early_items) if early_items else 'Стандарт'}\n🔸 **Основные:** {', '.join(core_items) if core_items else 'По ситуации'}"
 
             embed.add_field(name="Основной атрибут", value=primary_attr, inline=True)
             embed.add_field(name="Атакующий тип", value=target_hero.get('attack_type', 'Неизвестно'), inline=True)
-            embed.add_field(name="\u200b", value="\u200b", inline=True)
+            embed.add_field(name="🎯 Роли", value=roles_str, inline=True)
             
             embed.add_field(name="📊 Винрейт в пабликах", value=pub_winrate, inline=True)
             embed.add_field(name="🏆 Про-пики / Баны", value=f"👤 {pro_pick} / 🚫 {pro_ban}", inline=True)
-            embed.add_field(name="🔥 Про-победы", value=f"{pro_win} матчей", inline=True)
+            embed.add_field(name="\u200b", value="\u200b", inline=True)
 
-            embed.set_footer(text=f"ID героя: {target_hero.get('id')} | Данные текущей меты OpenDota")
+            embed.add_field(name="🎒 Популярные предметы", value=items_text, inline=False)
+
+            embed.set_footer(text=f"ID героя: {hero_id} | Мета-анализ OpenDota")
 
             await ctx.send(embed=embed)
 

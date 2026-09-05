@@ -67,7 +67,7 @@ async def counter_command(ctx, hero_name: str, *, enemies_str: str):
             )
 
             response = ai_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.6-flash',
                 contents=prompt,
             )
             
@@ -84,6 +84,13 @@ async def counter_command(ctx, hero_name: str, *, enemies_str: str):
 
         except Exception as e:
             await ctx.send(f"⚠️ Ошибка при обращении к Gemini API: `{e}`")
+
+if __name__ == "__main__":
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        print("Ошибка: Токен не найден в переменных окружения DISCORD_TOKEN!")
+    else:
+        bot.run(token)
 
 if __name__ == "__main__":
     bot.run(os.environ.get("DISCORD_TOKEN"))

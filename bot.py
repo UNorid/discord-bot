@@ -1871,6 +1871,107 @@ async def meta_command(ctx):
         except Exception as e:
             await ctx.send(f"⚠️ Ошибка при загрузке меты: `{e}`")
 
+@bot.command(name="контра", aliases=["counter"])
+async def counter_command(ctx, hero_name: str, *, enemies_str: str):
+    async with ctx.typing():
+        try:
+            if 'load_item_names' in globals() and callable(load_item_names):
+                await load_item_names()
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://api.opendota.com/api/heroStats") as resp:
+                    if resp.status != 200:
+                        await ctx.send("❌ Не удалось получить данные от OpenDota.")
+                        return
+                    heroes_data = await resp.json()
+
+            # Ищем твоего героя
+            target_hero = None
+            for h in heroes_data:
+                if h.get("localized_name", "").lower() == hero_name.lower():
+                    target_hero = h
+                    break
+
+            if not target_hero:
+                await ctx.send(f"❌ Твой герой **{hero_name}** не найден.")
+                return
+
+            hero_id = target_hero.get('id')
+            hero_clean_name = target_hero.get('name', '').replace('npc_dota_hero_', '')
+            image_url = f"https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/{hero_clean_name}.png"
+
+            # Парсим врагов (разделяем по запятой или пробелам)
+            enemy_names = [e.strip().lower() for e in enemies_str.replace(',', ' ').split() if e.strip()]
+            
+            matched_enemies = []
+            enemy_hero_ids = []
+            for h in heroes_data:
+                if h.get("localized_name", "").lower() in enemy_names:
+                    matched_enemies.append(h.get("localized_name"))
+                    enemy_hero_ids.append(h.get("id"))
+
+            # Забираем популярные предметы твоего героя
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://api.opendota.com/api/heroes/{hero_id}/itemPopularity") as item_resp:
+                    items_data = await item_resp.json() if item_resp.status == 200 else {}
+
+            # Собираем базовые популярные мид/лейт предметы героя
+            def get_item_list(sub_dict):
+                if not sub_dict or not isinstance(sub_dict, dict):
+                    return []
+                sorted_items = sorted(sub_dict.items(), key=lambda x: x[1], reverse=True)[:5]
+                names = []
+                for item_id_str, _ in sorted_items:
+                    try:
+                        item_id = int(item_id_str)
+                        name = ITEM_NAMES_CACHE.get(item_id, f"Предмет #{item_id}")
+                        names.append(name)
+                    except ValueError:
+                        continue
+                return names
+
+            core_items = get_item_list(items_data.get('mid_game_items', {}))
+            late_items = get_item_list(items_data.get('late_game_items', {}))
+
+            # Базовые рекомендации по защите против определенных героев (упрощенная аналитика по типу урона/контроля)
+            # Можно дополнить общими полезными защитными артефактами в зависимости от ситуации
+            situational_tips = []
+            
+            # Простейший анализатор контр-предметов по имени врагов в матче
+            enemies_lower = " ".join(enemy_names)
+            if any(k in enemies_lower for k in ["sniper", "pa", "phantom assassin", "ursa", "troll"]):
+                situational_tips.append("🛡️ **Против физического урона / уворотов:** Ghost Scepter, Blade Mail, Heaven's Halberd, Monkey King Bar")
+            if any(k in enemies_lower for k in ["invoker", "zeus", "lina", "lion", "pugna", "Leshrac"]):
+                situational_tips.append("🔮 **Против магии и прокастов:** Black King Bar (BKB), Pipe of Insight, Mage Slayer")
+            if any(k in enemies_lower for k in ["pudge", "bane", "faceless void", "batrider", "shaman"]):
+                situational_tips.append("🔗 **Против долгого контроля (дизейблов):** Linken's Sphere, BKB, Purge (Diffusal Blade / Eul's)")
+
+            embed = discord.Embed(
+                title=f"⚔️ Сборка против пика для: {target_hero['localized_name']}",
+                color=0xE67E22
+            )
+            embed.set_thumbnail(url=image_url)
+
+            enemies_display = ", ".join(matched_enemies) if matched_enemies else enemies_str
+            embed.add_field(name="👥 Вражеский пик", value=enemies_display, inline=False)
+            
+            core_str = ", ".join(core_items) if core_items else "По ситуации"
+            late_str = ", ".join(late_items) if late_items else "По ситуации"
+            
+            embed.add_field(name="🟡 Основной кор (Мидгейм)", value=core_str, inline=False)
+            embed.add_field(name="🔴 Основной лейт", value=late_str, inline=False)
+
+            if situational_tips:
+                embed.add_field(name="💡 Ситуативные контр-предметы под врагов", value="\n".join(situational_tips), inline=False)
+            else:
+                embed.add_field(name="💡 Ситуативные контр-предметы", value="Стандартные защитные слоты (BKB, Linken, Shiva)", inline=False)
+
+            embed.set_footer(text="Анализ матчапа на основе OpenDota и базовых механик")
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"⚠️ Ошибка: `{e}`")
+
 if __name__ == "__main__":
     token = os.getenv("TOKEN")
     if not token:

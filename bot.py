@@ -1632,37 +1632,6 @@ async def secret(ctx):
     except:
         pass
 
-@bot.command(name="герой", aliases=["hero"])
-async def load_hero_names():
-    """Загружает и кэширует список героев Dota 2 (id -> данные) с OpenDota."""
-    global HERO_NAMES_CACHE
-    if HERO_NAMES_CACHE:
-        return
-    try:
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                f"{OPENDOTA_BASE_URL}/heroes", headers=OPENDOTA_HEADERS
-            ) as resp:
-                if resp.status == 200:
-                    heroes = await resp.json()
-                    # Сохраняем и локализованное имя, и системное имя для картинок
-                    HERO_NAMES_CACHE = {
-                        h["id"]: {
-                            "name": h.get("name", "").replace("npc_dota_hero_", ""),
-                            "localized_name": h.get("localized_name", f"Герой #{h['id']}")
-                        }
-                        for h in heroes
-                    }
-    except Exception as e:
-        print(f"Не удалось загрузить список героев с OpenDota: {e}")
-
-# Изменяем вспомогательную функцию под новый кэш
-def get_hero_data(hero_id: int) -> dict:
-    return HERO_NAMES_CACHE.get(hero_id, {"name": "", "localized_name": f"Герой #{hero_id}"})
-
-def get_hero_name(hero_id: int) -> str:
-    return get_hero_data(hero_id)["localized_name"]
 
 if __name__ == "__main__":
     token = os.getenv("TOKEN")

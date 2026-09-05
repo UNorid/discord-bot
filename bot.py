@@ -66,8 +66,8 @@ async def counter_command(ctx, hero_name: str, *, enemies_str: str):
                 f"4. План на драку (кого фокусить, как позиционироваться)."
             )
 
-           response = ai_client.models.generate_content(
-                model='gemini-3.6-flash',
+            response = ai_client.models.generate_content(
+                model='gemini-2.5-flash',
                 contents=prompt,
             )
             

@@ -1756,6 +1756,68 @@ async def hero_command(ctx, *, hero_query: str):
         except Exception as e:
             await ctx.send(f"⚠️ Ошибка: `{e}`")
 
+@bot.command(name="мета", aliases=["meta"])
+async def meta_command(ctx):
+    async with ctx.typing():
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://api.opendota.com/api/heroStats") as resp:
+                    if resp.status != 200:
+                        await ctx.send("❌ Не удалось получить данные меты от OpenDota.")
+                        return
+                    heroes_data = await resp.json()
+
+            # Обрабатываем винрейт для каждого героя
+            processed_heroes = []
+            for h in heroes_data:
+                name = h.get('localized_name', 'Unknown')
+                roles = h.get('roles', [])
+                
+                pub_pick = sum(h.get(f'{i}_pick', 0) for i in range(1, 9))
+                pub_win = sum(h.get(f'{i}_win', 0) for i in range(1, 9))
+                winrate = (pub_win / pub_pick * 100) if pub_pick > 0 else 0
+                
+                processed_heroes.append({
+                    "name": name,
+                    "roles": roles,
+                    "winrate": winrate,
+                    "picks": pub_pick
+                })
+
+            # Функция для отбора топ-3 по роли
+            def get_top_by_role(role_name, min_picks=1000):
+                filtered = [
+                    h for h in processed_heroes 
+                    if role_name in h['roles'] and h['picks'] > min_picks
+                ]
+                filtered.sort(key=lambda x: x['winrate'], reverse=True)
+                top = filtered[:3]
+                if not top:
+                    return "Нет данных"
+                return ", ".join([f"**{h['name']}** ({h['winrate']:.1f}%)" for h in top])
+
+            carry_top = get_top_by_role("Carry")
+            mid_top = get_top_by_role("Nuker") # Или через Escape/Initiator, но Nuker/Disabler ближе к миду
+            off_top = get_top_by_role("Durable")
+            supp_top = get_top_by_role("Support")
+
+            embed = discord.Embed(
+                title="📈 Актуальная мета патча (Топ героев по позициям)",
+                color=0x1ABC9C
+            )
+            
+            embed.add_field(name="🗡️ Керри (Позиция 1)", value=carry_top, inline=False)
+            embed.add_field(name="⚡ Мидер (Позиция 2)", value=mid_top, inline=False)
+            embed.add_field(name="🛡️ Оффлейн (Позиция 3)", value=off_top, inline=False)
+            embed.add_field(name="💊 Саппорты (Позиции 4-5)", value=supp_top, inline=False)
+
+            embed.set_footer(text="Статистика основывается на открытых матчах пабликов OpenDota")
+
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"⚠️ Ошибка при загрузке меты: `{e}`")
+
 if __name__ == "__main__":
     token = os.getenv("TOKEN")
     if not token:

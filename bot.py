@@ -4,6 +4,7 @@ import asyncio
 import random
 import time
 import sqlite3
+import json
 import aiohttp
 import discord
 from discord.ext import commands, tasks
@@ -35,10 +36,16 @@ STRATZ_TOKEN = os.getenv(
 STRATZ_GRAPHQL_URL = "https://api.stratz.com/graphql"
 
 # STRATZ требует указывать корректный User-Agent — иначе может отдавать ошибку.
+# Дополнительные заголовки (Accept/Origin/Referer) помогают запросу выглядеть
+# "по-браузерному" — некоторые API/CDN (Cloudflare и т.п.) блокируют запросы
+# без них, отдавая вместо JSON html-страницу с 403.
 STRATZ_HEADERS = {
     "Authorization": f"Bearer {STRATZ_TOKEN}",
     "Content-Type": "application/json",
-    "User-Agent": "PRACHKA-DRACHKA-DiscordBot",
+    "Accept": "application/json",
+    "User-Agent": "PRACHKA-DRACHKA-DiscordBot/1.0",
+    "Origin": "https://stratz.com",
+    "Referer": "https://stratz.com/",
 }
 
 STRATZ_MATCH_QUERY = """
@@ -90,7 +97,27 @@ async def fetch_stratz_match(match_id: int):
         async with session.post(
             STRATZ_GRAPHQL_URL, json=payload, headers=STRATZ_HEADERS
         ) as resp:
-            data = await resp.json()
+            raw_text = await resp.text()
+            content_type = resp.headers.get("Content-Type", "")
+
+            # Если сервер вернул не JSON (например html-страницу блокировки от
+            # Cloudflare/WAF), сразу даём понятную диагностику вместо падения
+            # с невнятным ContentTypeError.
+            if "application/json" not in content_type:
+                snippet = raw_text.strip().replace("\n", " ")[:200]
+                raise RuntimeError(
+                    f"STRATZ API вернул не-JSON ответ (статус {resp.status}, "
+                    f"Content-Type: {content_type or 'не указан'}). Это похоже "
+                    f"на блокировку запроса (например, Cloudflare/WAF), а не на "
+                    f"ошибку самого GraphQL-запроса. Начало ответа: «{snippet}»"
+                )
+
+            try:
+                data = json.loads(raw_text)
+            except json.JSONDecodeError:
+                raise RuntimeError(
+                    f"Не удалось разобрать JSON от STRATZ API (статус {resp.status})."
+                )
 
             if resp.status != 200:
                 raise RuntimeError(

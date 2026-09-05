@@ -205,6 +205,313 @@ async def dota_match(ctx, match_id: int = None):
 
 
 # ============================================================
+# Сравнение с про-игроком (OpenDota Explorer API)
+# ============================================================
+# OpenDota предоставляет доступ к своей базе через произвольные SQL-запросы
+# (эндпоинт /explorer). Это позволяет находить профессиональные матчи с тем
+# же героем против максимально похожего пика врагов и сравнивать билд предметов.
+
+ITEM_NAMES_CACHE = {}
+PRO_PLAYERS_CACHE = {}
+
+
+async def load_item_names():
+    """Загружает и кэширует список предметов Dota 2 (id -> имя) с OpenDota."""
+    global ITEM_NAMES_CACHE
+    if ITEM_NAMES_CACHE:
+        return
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{OPENDOTA_BASE_URL}/constants/items", headers=OPENDOTA_HEADERS
+            ) as resp:
+                if resp.status == 200:
+                    items = await resp.json()
+                    cache = {}
+                    for item in items.values():
+                        item_id = item.get("id")
+                        if item_id:
+                            cache[item_id] = (
+                                item.get("dname") or item.get("name") or f"Предмет #{item_id}"
+                            )
+                    ITEM_NAMES_CACHE = cache
+    except Exception as e:
+        print(f"Не удалось загрузить список предметов с OpenDota: {e}")
+
+
+async def load_pro_players():
+    """Загружает и кэширует список известных про-игроков (account_id -> имя)."""
+    global PRO_PLAYERS_CACHE
+    if PRO_PLAYERS_CACHE:
+        return
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{OPENDOTA_BASE_URL}/proPlayers", headers=OPENDOTA_HEADERS
+            ) as resp:
+                if resp.status == 200:
+                    pros = await resp.json()
+                    PRO_PLAYERS_CACHE = {
+                        p["account_id"]: (
+                            p.get("name") or p.get("personaname") or f"Игрок #{p['account_id']}"
+                        )
+                        for p in pros
+                        if p.get("account_id")
+                    }
+    except Exception as e:
+        print(f"Не удалось загрузить список про-игроков с OpenDota: {e}")
+
+
+def resolve_hero_id(query: str):
+    """Находит hero_id по (частичному) названию героя, например 'viper' или 'legion'."""
+    query_norm = query.strip().lower()
+    if not query_norm:
+        return None
+
+    for hid, name in HERO_NAMES_CACHE.items():
+        if name.lower() == query_norm:
+            return hid
+
+    for hid, name in HERO_NAMES_CACHE.items():
+        if query_norm in name.lower():
+            return hid
+
+    return None
+
+
+def is_player_radiant(p: dict) -> bool:
+    is_radiant = p.get("isRadiant")
+    if is_radiant is None:
+        is_radiant = (p.get("player_slot", 0) or 0) < 128
+    return bool(is_radiant)
+
+
+async def fetch_opendota_explorer(sql: str):
+    """Выполняет SQL-запрос через OpenDota Explorer API и возвращает список строк."""
+    url = f"{OPENDOTA_BASE_URL}/explorer"
+    params = {"sql": sql}
+    if OPENDOTA_API_KEY:
+        params["api_key"] = OPENDOTA_API_KEY
+
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            url, headers=OPENDOTA_HEADERS, params=params
+        ) as resp:
+            raw_text = await resp.text()
+            content_type = resp.headers.get("Content-Type", "")
+
+            if "application/json" not in content_type:
+                snippet = raw_text.strip().replace("\n", " ")[:200]
+                raise RuntimeError(
+                    f"OpenDota Explorer вернул не-JSON ответ (статус {resp.status}). "
+                    f"Начало ответа: «{snippet}»"
+                )
+
+            try:
+                data = json.loads(raw_text)
+            except json.JSONDecodeError:
+                raise RuntimeError(
+                    f"Не удалось разобрать JSON от OpenDota Explorer (статус {resp.status})."
+                )
+
+            if resp.status != 200:
+                raise RuntimeError(
+                    f"OpenDota Explorer вернул статус {resp.status}: {data}"
+                )
+
+            return data.get("rows") or []
+
+
+async def find_similar_pro_match(hero_id: int, enemy_hero_ids):
+    """Ищет среди недавних про-матчей с этим героем тот, где вражеский пик
+    максимально похож на переданный список enemy_hero_ids."""
+    sql = f"""
+        SELECT pm.match_id, pm.account_id, pm.player_slot, pm.kills, pm.deaths, pm.assists,
+               pm.gold_per_min, pm.xp_per_min,
+               pm.item_0, pm.item_1, pm.item_2, pm.item_3, pm.item_4, pm.item_5,
+               m.start_time,
+               (
+                 SELECT array_agg(pm2.hero_id)
+                 FROM player_matches pm2
+                 WHERE pm2.match_id = pm.match_id
+                   AND (pm2.player_slot < 128) <> (pm.player_slot < 128)
+               ) AS enemy_heroes
+        FROM player_matches pm
+        JOIN matches m ON m.match_id = pm.match_id
+        WHERE pm.hero_id = {int(hero_id)}
+          AND m.leagueid IS NOT NULL
+        ORDER BY m.start_time DESC
+        LIMIT 40
+    """
+    rows = await fetch_opendota_explorer(sql)
+
+    enemy_set = set(h for h in (enemy_hero_ids or []) if h)
+    best_row = None
+    best_overlap = -1
+
+    for row in rows:
+        row_enemies = set(row.get("enemy_heroes") or [])
+        overlap = len(row_enemies & enemy_set)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_row = row
+
+    return best_row
+
+
+def build_comparison_embed(you: dict, pro: dict, hero_id: int, enemy_heroes, match_id: int) -> discord.Embed:
+    hero_name = get_hero_name(hero_id)
+    pro_account_id = pro.get("account_id")
+    pro_name = PRO_PLAYERS_CACHE.get(pro_account_id, f"Игрок #{pro_account_id}")
+
+    def item_set(entry):
+        return {entry.get(f"item_{i}") for i in range(6)} - {0, None}
+
+    you_items = item_set(you)
+    pro_items = item_set(pro)
+
+    missing_items = pro_items - you_items   # было у про, нет у тебя
+    extra_items = you_items - pro_items     # было у тебя, нет у про
+
+    def fmt_items(ids):
+        names = [ITEM_NAMES_CACHE.get(i, f"Предмет #{i}") for i in ids]
+        return ", ".join(sorted(names)) if names else "—"
+
+    embed = discord.Embed(
+        title=f"📊 Сравнение с про-игроком: {hero_name}",
+        description=(
+            f"Твой матч: `#{match_id}` • Похожая про-игра: `#{pro.get('match_id')}` "
+            f"({pro_name})"
+        ),
+        color=0x8B0000,
+    )
+
+    you_kills, you_deaths, you_assists = you.get("kills", 0), you.get("deaths", 0), you.get("assists", 0)
+    pro_kills, pro_deaths, pro_assists = pro.get("kills", 0), pro.get("deaths", 0), pro.get("assists", 0)
+    you_gpm, you_xpm = you.get("gold_per_min", 0), you.get("xp_per_min", 0)
+    pro_gpm, pro_xpm = pro.get("gold_per_min", 0), pro.get("xp_per_min", 0)
+
+    embed.add_field(
+        name="🧑 Ты",
+        value=(
+            f"⚔️ KDA: `{you_kills}/{you_deaths}/{you_assists}`\n"
+            f"💰 GPM: `{you_gpm}`\n"
+            f"✨ XPM: `{you_xpm}`"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"🌟 {pro_name}",
+        value=(
+            f"⚔️ KDA: `{pro_kills}/{pro_deaths}/{pro_assists}`\n"
+            f"💰 GPM: `{pro_gpm}`\n"
+            f"✨ XPM: `{pro_xpm}`"
+        ),
+        inline=True,
+    )
+
+    gpm_diff = pro_gpm - you_gpm
+    xpm_diff = pro_xpm - you_xpm
+    diff_lines = []
+    if gpm_diff > 0:
+        diff_lines.append(f"💰 У про GPM выше на `{gpm_diff}`")
+    elif gpm_diff < 0:
+        diff_lines.append(f"💰 У тебя GPM выше на `{-gpm_diff}`")
+    if xpm_diff > 0:
+        diff_lines.append(f"✨ У про XPM выше на `{xpm_diff}`")
+    elif xpm_diff < 0:
+        diff_lines.append(f"✨ У тебя XPM выше на `{-xpm_diff}`")
+    embed.add_field(
+        name="📈 Разница в показателях",
+        value="\n".join(diff_lines) if diff_lines else "Показатели почти одинаковые",
+        inline=False,
+    )
+
+    embed.add_field(
+        name="🛒 Что купил про, а у тебя не было",
+        value=fmt_items(missing_items),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎒 Что было у тебя, а у про — нет",
+        value=fmt_items(extra_items),
+        inline=False,
+    )
+
+    enemy_names = ", ".join(get_hero_name(h) for h in enemy_heroes) if enemy_heroes else "неизвестно"
+    embed.set_footer(text=f"Против: {enemy_names} • Данные: OpenDota API (Explorer)")
+    return embed
+
+
+@bot.command(name="сравнить", aliases=["анализ", "compare", "прокомпар"])
+async def compare_with_pro(ctx, match_id: int = None, *, hero_query: str = None):
+    """Сравнивает твою игру на герое с похожей игрой про-игрока (по билду и статам)."""
+    if match_id is None or not hero_query:
+        await ctx.send(
+            f"⚠️ {ctx.author.mention}, укажи ID матча и название своего героя!\n"
+            f"Пример: `!сравнить 8981903250 Viper`",
+            delete_after=12,
+        )
+        return
+
+    loading_msg = await ctx.send(
+        f"🔎 Ищу твою партию и подбираю похожую про-игру для героя `{hero_query}`..."
+    )
+
+    try:
+        await load_hero_names()
+        await load_item_names()
+        await load_pro_players()
+
+        hero_id = resolve_hero_id(hero_query)
+        if hero_id is None:
+            await loading_msg.edit(
+                content=(
+                    f"❌ Не нашёл героя по запросу «{hero_query}». Проверь название "
+                    f"(например: Pudge, Legion Commander, Spirit Breaker)."
+                )
+            )
+            return
+
+        match_data = await fetch_opendota_match(match_id)
+        players = match_data.get("players") or []
+
+        target_player = next((p for p in players if p.get("hero_id") == hero_id), None)
+        if not target_player:
+            await loading_msg.edit(
+                content=f"❌ В матче `#{match_id}` не найден герой **{get_hero_name(hero_id)}**."
+            )
+            return
+
+        target_side = is_player_radiant(target_player)
+        enemy_heroes = [
+            p.get("hero_id") for p in players
+            if p.get("hero_id") and is_player_radiant(p) != target_side
+        ]
+
+        pro_match = await find_similar_pro_match(hero_id, enemy_heroes)
+        if not pro_match:
+            await loading_msg.edit(
+                content=(
+                    f"❌ Не нашёл в базе про-матчей с героем **{get_hero_name(hero_id)}**. "
+                    f"Попробуй другого героя из этого матча."
+                )
+            )
+            return
+
+        embed = build_comparison_embed(target_player, pro_match, hero_id, enemy_heroes, match_id)
+        await loading_msg.edit(content=None, embed=embed)
+
+    except asyncio.TimeoutError:
+        await loading_msg.edit(content="❌ OpenDota API не ответил вовремя. Попробуй позже.")
+    except Exception as e:
+        await loading_msg.edit(content=f"❌ Не удалось сделать сравнение: `{e}`")
+
+
+# ============================================================
 # Инициализация базы данных SQLite
 # ============================================================
 DB_FILE = "bot_database.db"

@@ -1633,7 +1633,6 @@ async def secret(ctx):
 async def hero_command(ctx, *, hero_query: str):
     async with ctx.typing():
         try:
-            # Убедимся, что кеш названий предметов загружен
             if 'load_item_names' in globals() and callable(load_item_names):
                 await load_item_names()
 
@@ -1658,11 +1657,13 @@ async def hero_command(ctx, *, hero_query: str):
             hero_name_clean = target_hero.get('name', '').replace('npc_dota_hero_', '')
             image_url = f"https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/{hero_name_clean}.png"
 
-            items_data = {}
+            # Параллельно забираем популярные предметы и матчапы (контрпики)
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"https://api.opendota.com/api/heroes/{hero_id}/itemPopularity") as item_resp:
-                    if item_resp.status == 200:
-                        items_data = await item_resp.json()
+                    items_data = await item_resp.json() if item_resp.status == 200 else {}
+                
+                async with session.get(f"https://api.opendota.com/api/heroes/{hero_id}/matchups") as matchup_resp:
+                    matchups_data = await matchup_resp.json() if matchup_resp.status == 200 else []
 
             embed = discord.Embed(
                 title=f"🛡️ Разбор героя: {target_hero['localized_name']}",
@@ -1670,7 +1671,6 @@ async def hero_command(ctx, *, hero_query: str):
             )
             embed.set_thumbnail(url=image_url)
             
-            # Словари переводов
             attr_map = {"str": "Сила 💪", "agi": "Ловкость 🏃‍♂️", "int": "Интеллект 🧠", "all": "Универсальный ✨"}
             primary_attr = attr_map.get(target_hero.get('primary_attr'), "Неизвестно")
 
@@ -1678,15 +1678,9 @@ async def hero_command(ctx, *, hero_query: str):
             attack_type = attack_map.get(target_hero.get('attack_type', ''), target_hero.get('attack_type', 'Неизвестно'))
 
             roles_map = {
-                "Carry": "Керри",
-                "Support": "Саппорт",
-                "Nuker": "Нюкер",
-                "Disabler": "Дизейблер",
-                "Durable": "Тяжеловес",
-                "Escape": "Эскейпер",
-                "Pusher": "Пушер",
-                "Initiator": "Инициатор",
-                "Jungler": "Лесник"
+                "Carry": "Керри", "Support": "Саппорт", "Nuker": "Нюкер",
+                "Disabler": "Дизейблер", "Durable": "Тяжеловес", "Escape": "Эскейпер",
+                "Pusher": "Пушер", "Initiator": "Инициатор", "Jungler": "Лесник"
             }
 
             pro_pick = target_hero.get('pro_pick', 0)
@@ -1700,6 +1694,7 @@ async def hero_command(ctx, *, hero_query: str):
             translated_roles = [roles_map.get(role, role) for role in raw_roles]
             roles_str = ", ".join(translated_roles) if translated_roles else "Универсал"
 
+            # Обработка предметов
             def get_names_from_dict(sub_dict):
                 if not sub_dict or not isinstance(sub_dict, dict):
                     return "По ситуации"
@@ -1724,6 +1719,32 @@ async def hero_command(ctx, *, hero_query: str):
                 f"🔴 **Лейт:** {late_items}"
             )
 
+            # Обработка матчапов (контрпиков)
+            # В matchups лежат данные по каждому герою противнику: id, games_played, wins
+            # Считаем винрейт против каждого: (wins / games_played)
+            # Если винрейт высокий (>50%) — кого он контрит. Если низкий (<50%) — кто его контрит.
+            hero_name_map = {h['id']: h['localized_name'] for h in heroes_data}
+
+            valid_matchups = []
+            for m in matchups_data:
+                games = m.get('games_played', 0)
+                if games > 50:  эти отсеиваем малые выборки
+                    wins = m.get('wins', 0)
+                    winrate = wins / games
+                    opp_id = m.get('hero_id')
+                    if opp_id in hero_name_map:
+                        valid_matchups.append((hero_name_map[opp_id], winrate))
+
+            # Сортируем: где винрейт выше всего — лучшие матчапы (кого контрит)
+            valid_matchups.sort(key=lambda x: x[1], reverse=True)
+            strong_against = [x[0] for x in valid_matchups[:3]]
+            weak_against = [x[0] for x in valid_matchups[-3:]]  # где винрейт минимальный (кто контрит)
+
+            matchups_text = (
+                f"🟢 **Силен против:** {', '.join(strong_against) if strong_against else 'Нет данных'}\n"
+                f"🔴 **Слаб против (Контрят):** {', '.join(reversed(weak_against)) if weak_against else 'Нет данных'}"
+            )
+
             embed.add_field(name="Основной атрибут", value=primary_attr, inline=True)
             embed.add_field(name="Атакующий тип", value=attack_type, inline=True)
             embed.add_field(name="🎯 Роли", value=roles_str, inline=True)
@@ -1733,6 +1754,7 @@ async def hero_command(ctx, *, hero_query: str):
             embed.add_field(name="\u200b", value="\u200b", inline=True)
 
             embed.add_field(name="🎒 Сборки по таймингам", value=items_text, inline=False)
+            embed.add_field(name="⚔️ Матчапы и Контрпики", value=matchups_text, inline=False)
 
             embed.set_footer(text=f"ID героя: {hero_id} | Мета-анализ OpenDota")
 

@@ -1651,8 +1651,8 @@ async def hero_command(ctx, *, hero_query: str):
                 return
 
             # OpenDota отдает готовый путь прямо в ключе 'img', например: /apps/dota2/images/heroes/muerta_full.png
-            img_path = target_hero.get('img', '')
-            image_url = f"https://api.opendota.com{img_path}"
+            hero_name_clean = target_hero.get('name', '').replace('npc_dota_hero_', '')
+            image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_name_clean}_full.png"
 
             embed = discord.Embed(
                 title=f"🛡️ Разбор героя: {target_hero['localized_name']}",

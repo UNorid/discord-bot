@@ -363,10 +363,7 @@ async def find_similar_pro_match(hero_id: int, enemy_hero_ids):
 
 
 def build_comparison_embed(you: dict, pro: dict, hero_id: int, enemy_heroes, match_id: int) -> discord.Embed:
-    hero_data = get_hero_data(hero_id)
-    hero_name = hero_data["localized_name"]
-    hero_code_name = hero_data["name"]
-    
+    hero_name = get_hero_name(hero_id)
     pro_account_id = pro.get("account_id")
     pro_name = PRO_PLAYERS_CACHE.get(pro_account_id, f"Игрок #{pro_account_id}")
 
@@ -392,11 +389,12 @@ def build_comparison_embed(you: dict, pro: dict, hero_id: int, enemy_heroes, mat
         color=0x8B0000,
     )
 
-    # === ДОБАВЛЯЕМ КАРТИНКУ ГЕРОЯ СПРАВА ===
-    if hero_code_name:
-        image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_code_name}_full.png"
-        embed.set_thumbnail(url=image_url)
-    # ========================================
+    # === ВОТ ТУТ ДОБАВЛЯЕТСЯ КАРТИНКА ЧЕРЕЗ ТВОЙ СТАРЫЙ GET_HERO_NAME ===
+    # Мы просто берем имя героя, переводим в нижний регистр и убираем пробелы/дефисы для ссылки OpenDota
+    hero_code_name = hero_name.lower().replace(" ", "_").replace("'", "")
+    image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_code_name}_full.png"
+    embed.set_thumbnail(url=image_url)
+    # ===================================================================
 
     you_kills, you_deaths, you_assists = you.get("kills", 0), you.get("deaths", 0), you.get("assists", 0)
     pro_kills, pro_deaths, pro_assists = pro.get("kills", 0), pro.get("deaths", 0), pro.get("assists", 0)
@@ -453,7 +451,6 @@ def build_comparison_embed(you: dict, pro: dict, hero_id: int, enemy_heroes, mat
     enemy_names = ", ".join(get_hero_name(h) for h in enemy_heroes) if enemy_heroes else "неизвестно"
     embed.set_footer(text=f"Против: {enemy_names} • Данные: OpenDota API (Explorer)")
     return embed
-
 @bot.command(name="сравнить", aliases=["анализ", "compare", "прокомпар"])
 async def compare_with_pro(ctx, match_id: int = None, *, hero_query: str = None):
     """Сравнивает твою игру на герое с похожей игрой про-игрока (по билду и статам)."""

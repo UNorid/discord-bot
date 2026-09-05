@@ -7,6 +7,7 @@ import random
 import time
 import os
 import aiohttp
+from aiohttp import web
 
 # Инициализация бота
 intents = discord.Intents.default()
@@ -778,6 +779,16 @@ async def kick(ctx, member: discord.Member, *, reason="Нарушение пра
         await ctx.send(f"Не удалось кикнуть: {e}", delete_after=5)
 
 @bot.command(name="секрет", aliases=["secret"])
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", lambda r: web.Response(text="Bot is running!"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
 async def secret(ctx):
     allowed_roles = ["⚡ Штурмфюрер", "👁️ Смотрящий"]
     has_access = any(role.name in allowed_roles for role in ctx.author.roles)
@@ -812,9 +823,12 @@ async def secret(ctx):
     except:
         pass
 
+async def main():
+    await start_web_server()
+    # Укажите вашу переменную токена, если она называется иначе (например, TOKEN или DISCORD_TOKEN)
+    token = os.environ.get("DISCORD_TOKEN") 
+    await bot.start(token)
+
 if __name__ == "__main__":
-    token = os.getenv("TOKEN")
-    if not token:
-        print("Ошибка: Токен не найден в переменных окружения TOKEN!")
-    else:
-        bot.run(token)
+    import asyncio
+    asyncio.run(main())

@@ -1,67 +1,211 @@
-import discord
-from discord.ext import commands
-from discord.ui import Button, View
-import sqlite3
 import datetime
+import os
+import asyncio
 import random
 import time
-import os
+import sqlite3
 import aiohttp
+import discord
+from discord.ext import commands, tasks
+from discord.ui import View, Button, Modal, TextInput
 from aiohttp import web
 
-# Инициализация бота
 intents = discord.Intents.default()
+intents.guilds = True
 intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-DB_FILE = "database.db"
-cooldowns = {}
+# ============================================================
+# STRATZ API (Dota 2) — конфигурация
+# ============================================================
+# ВНИМАНИЕ (важно прочитать):
+# Токен ниже вшит как значение по умолчанию, чтобы бот сразу заработал.
+# Но т.к. этот файл вы, скорее всего, будете где-то хранить (репозиторий,
+# Render, и т.д.), настоятельно рекомендуется вместо этого задать
+# переменную окружения STRATZ_TOKEN в настройках хостинга (точно так же,
+# как вы уже делаете с TOKEN для Discord) и НЕ публиковать файл с токеном
+# в открытом виде — если токен "утечёт", его сможет использовать кто угодно
+# от вашего имени, и STRATZ может урезать/заблокировать доступ.
+STRATZ_TOKEN = os.getenv(
+    "STRATZ_TOKEN",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJTdWJqZWN0IjoiMTBiODRlNDYtODZhZi00MDA2LTkzMjgtYTlmYTRhMmIzYWUzIiwiU3RlYW1JZCI6IjE4ODIzMTQzMDEiLCJBUElVc2VyIjoidHJ1ZSIsIm5iZiI6MTc4ODU2MjgzNCwiZXhwIjoxODIwMDk4ODM0LCJpYXQiOjE3ODg1NjI4MzQsImlzcyI6Imh0dHBzOi8vYXBpLnN0cmF0ei5jb20ifQ._ALz7LvZ-WGIqIN1qSsjwlKMbj87rUuRpf89DMb_dEc",
+)
+STRATZ_GRAPHQL_URL = "https://api.stratz.com/graphql"
 
-# Конфигурация STRATZ API
-STRATZ_API_URL = "https://api.stratz.com/graphql"
-STRATZ_TOKEN = os.getenv("STRATZ_TOKEN", "") # Токен можно прописать в переменные окружения
-
-# Конфигурация ролей и структуры сервера
-SERVER_ROLES = [
-    {"name": "⚡ Штурмфюрер", "color": discord.Color.dark_red(), "permissions": discord.Permissions(administrator=True), "hoist": True},
-    {"name": "👁️ Смотрящий", "color": discord.Color.purple(), "permissions": discord.Permissions(manage_channels=True, manage_roles=True, kick_members=True, ban_members=True), "hoist": True},
-    {"name": "🎮 Боевой товарищ", "color": discord.Color.blue(), "permissions": discord.Permissions(send_messages=True, view_channel=True), "hoist": True}
-]
-
-SERVER_STRUCTURE = {
-    "📢 ИНФОРМАЦИЯ": [
-        {"name": "📢-новости", "type": "text", "desc": "Официальные объявления сервера."},
-        {"name": "📜-правила", "type": "text", "desc": "Свод законов и порядков."}
-    ],
-    "💬 ОБЩЕНИЕ": [
-        {"name": "💬-курилка", "type": "text", "desc": "Общие разговоры обо всем."},
-        {"name": "🔊 Общий войс", "type": "voice"}
-    ],
-    "👁️ СЕКРЕТНАЯ ЗОНА": [
-        {"name": "👁️‍🗨️-бункер", "type": "text", "desc": "Закрытая комната для руководства."},
-        {"name": "🔒 Старший войс", "type": "voice"}
-    ],
-    "🔒 ЛОГИ": [
-        {"name": "🔒-logs", "type": "text", "desc": "Системный журнал модерации."}
-    ]
+# STRATZ требует указывать корректный User-Agent — иначе может отдавать ошибку.
+STRATZ_HEADERS = {
+    "Authorization": f"Bearer {STRATZ_TOKEN}",
+    "Content-Type": "application/json",
+    "User-Agent": "PRACHKA-DRACHKA-DiscordBot",
 }
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
+STRATZ_MATCH_QUERY = """
+query MatchDetails($matchId: Long!) {
+  match(id: $matchId) {
+    id
+    didRadiantWin
+    durationSeconds
+    startDateTime
+    gameMode
+    players {
+      steamAccountId
+      isRadiant
+      kills
+      deaths
+      assists
+      numLastHits
+      goldPerMinute
+      experiencePerMinute
+      networth
+      hero {
+        displayName
+      }
+      steamAccount {
+        name
+      }
+    }
+  }
+}
+"""
+
+
+def format_duration(total_seconds):
+    if total_seconds is None:
+        return "??:??"
+    minutes = int(total_seconds) // 60
+    seconds = int(total_seconds) % 60
+    return f"{minutes}:{seconds:02d}"
+
+
+async def fetch_stratz_match(match_id: int):
+    """Делает запрос к STRATZ GraphQL API и возвращает данные матча (dict) либо кидает исключение."""
+    payload = {
+        "query": STRATZ_MATCH_QUERY,
+        "variables": {"matchId": match_id},
+    }
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            STRATZ_GRAPHQL_URL, json=payload, headers=STRATZ_HEADERS
+        ) as resp:
+            data = await resp.json()
+
+            if resp.status != 200:
+                raise RuntimeError(
+                    f"STRATZ API вернул статус {resp.status}: {data}"
+                )
+
+            if "errors" in data and data["errors"]:
+                raise RuntimeError(
+                    "; ".join(err.get("message", "Неизвестная ошибка") for err in data["errors"])
+                )
+
+            match_data = data.get("data", {}).get("match")
+            if not match_data:
+                raise ValueError("Матч не найден. Проверь ID матча.")
+
+            return match_data
+
+
+def build_match_embed(match_data: dict, match_id: int) -> discord.Embed:
+    radiant_win = match_data.get("didRadiantWin")
+    duration = format_duration(match_data.get("durationSeconds"))
+    players = match_data.get("players") or []
+
+    winner_text = "🟢 Победа Radiant" if radiant_win else "🔴 Победа Dire"
+
+    embed = discord.Embed(
+        title=f"🎮 Матч Dota 2 #{match_id}",
+        description=f"{winner_text} • ⏱️ Длительность: **{duration}**",
+        color=0x8B0000,
+    )
+
+    radiant_lines = []
+    dire_lines = []
+
+    for p in players:
+        hero_name = (p.get("hero") or {}).get("displayName") or "Неизвестный герой"
+        acc_name = (p.get("steamAccount") or {}).get("name") or "Аноним"
+        kills = p.get("kills", 0)
+        deaths = p.get("deaths", 0)
+        assists = p.get("assists", 0)
+        gpm = p.get("goldPerMinute", 0)
+        xpm = p.get("experiencePerMinute", 0)
+
+        line = (
+            f"**{hero_name}** ({acc_name})\n"
+            f"⚔️ `{kills}/{deaths}/{assists}` • 💰 GPM `{gpm}` • ✨ XPM `{xpm}`"
+        )
+
+        if p.get("isRadiant"):
+            radiant_lines.append(line)
+        else:
+            dire_lines.append(line)
+
+    embed.add_field(
+        name="🟢 Radiant",
+        value="\n\n".join(radiant_lines) if radiant_lines else "Нет данных",
+        inline=True,
+    )
+    embed.add_field(
+        name="🔴 Dire",
+        value="\n\n".join(dire_lines) if dire_lines else "Нет данных",
+        inline=True,
+    )
+
+    embed.set_footer(text="Данные предоставлены STRATZ API")
+    return embed
+
+
+@bot.command(name="матч", aliases=["стратз", "stratz", "dota"])
+async def stratz_match(ctx, match_id: int = None):
+    """Анализ матча Dota 2 по его ID через STRATZ API."""
+    if match_id is None:
+        await ctx.send(
+            f"⚠️ {ctx.author.mention}, укажи ID матча! Пример: `!матч 7891234567`",
+            delete_after=10,
+        )
+        return
+
+    loading_msg = await ctx.send(f"🔎 Ищу данные о матче `#{match_id}` в STRATZ...")
+
+    try:
+        match_data = await fetch_stratz_match(match_id)
+        embed = build_match_embed(match_data, match_id)
+        await loading_msg.edit(content=None, embed=embed)
+    except ValueError as e:
+        await loading_msg.edit(content=f"❌ {e}")
+    except asyncio.TimeoutError:
+        await loading_msg.edit(content="❌ STRATZ API не ответил вовремя. Попробуй позже.")
+    except Exception as e:
+        await loading_msg.edit(
+            content=f"❌ Не удалось получить данные о матче: `{e}`"
+        )
+
+
+# ============================================================
+# Инициализация базы данных SQLite
+# ============================================================
+DB_FILE = "bot_database.db"
 
 def init_db():
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             exp INTEGER DEFAULT 0,
             level INTEGER DEFAULT 1,
-            last_daily TEXT DEFAULT ""
+            last_daily TEXT DEFAULT '2000-01-01'
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS temp_roles (
+            user_id INTEGER PRIMARY KEY,
+            role_id INTEGER,
+            expires_at TEXT
         )
     """)
     conn.commit()
@@ -69,47 +213,482 @@ def init_db():
 
 init_db()
 
-def get_user_data(user_id: int):
-    conn = get_db_connection()
+# Функции работы с базой данных
+def get_user_data(user_id):
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT exp, level, last_daily FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
-        return {"exp": row["exp"], "level": row["level"], "last_daily": row["last_daily"]}
-    else:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (user_id, exp, level, last_daily) VALUES (?, 0, 1, '')", (user_id,))
-        conn.commit()
-        conn.close()
-        return {"exp": 0, "level": 1, "last_daily": ""}
+        return {"exp": row[0], "level": row[1], "last_daily": row[2]}
+    return {"exp": 0, "level": 1, "last_daily": "2000-01-01"}
 
-def update_user_data(user_id: int, exp: int, level: int):
-    conn = get_db_connection()
+def update_user_full(user_id, exp, level, last_daily):
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET exp = ?, level = ? WHERE user_id = ?", (exp, level, user_id))
+    cursor.execute("""
+        INSERT INTO users (user_id, exp, level, last_daily) 
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET 
+            exp = excluded.exp, 
+            level = excluded.level,
+            last_daily = excluded.last_daily
+    """, (user_id, exp, level, last_daily))
     conn.commit()
     conn.close()
 
-def update_user_full(user_id: int, exp: int, level: int, last_daily: str):
-    conn = get_db_connection()
+def update_user_data(user_id, exp, level):
+    data = get_user_data(user_id)
+    update_user_full(user_id, exp, level, data["last_daily"])
+
+# Словарь для отслеживания кулдаунов дуэлей/больницы
+cooldowns = {}
+
+# Функция для получения названия ранга по уровню
+def get_rank_title(level):
+    if level >= 90:
+        return "👑 Легенда"
+    elif level >= 80:
+        return "🔴 Бессмертный"
+    elif level >= 70:
+        return "🟣 Владыка"
+    elif level >= 60:
+        return "🟣 Элита"
+    elif level >= 50:
+        return "🟠 Авторитет"
+    elif level >= 40:
+        return "🟠 Головорез"
+    elif level >= 30:
+        return "🟡 Ветеран"
+    elif level >= 20:
+        return "🟡 Служака"
+    elif level >= 10:
+        return "🟢 Боец"
+    else:
+        return "🟢 Новобранец"
+
+# Простенький web-сервер для того, чтобы Render видел открытый порт
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+app = web.Application()
+app.router.add_get("/", handle)
+
+async def start_web_server():
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
+
+SERVER_ROLES = [
+    {
+        "name": "⚡ Штурмфюрер",
+        "color": discord.Color.dark_red(),
+        "permissions": discord.Permissions(administrator=True),
+        "hoist": True,
+    },
+    {
+        "name": "👁️ Смотрящий",
+        "color": discord.Color.blue(),
+        "permissions": discord.Permissions(
+            manage_messages=True, kick_members=True, ban_members=True
+        ),
+        "hoist": True,
+    },
+    {
+        "name": "🎮 Боевой товарищ",
+        "color": discord.Color.green(),
+        "permissions": discord.Permissions(send_messages=True, view_channel=True),
+        "hoist": True,
+    },
+]
+
+SERVER_STRUCTURE = {
+    "📜 ТЕКСТОВЫЕ КАНАЛЫ": [
+        {
+            "name": "📜-правила",
+            "type": "text",
+            "desc": (
+                "**Свои правила для своих:**\n\n1. Уважение в катках и"
+                " чате.\n2. Никакого токсичного мусора.\n*Залетел — играй"
+                " до конца.*"
+            ),
+        },
+        {
+            "name": "💬-флудилка",
+            "type": "text",
+            "desc": "Общаемся, скидываем мемы и координируемся перед каткой.",
+        },
+        {
+            "name": "📢-новости",
+            "type": "text",
+            "desc": "Важные анонсы и сбор состава на вечер.",
+        },
+    ],
+    "🛠️ ДОПОЛНИТЕЛЬНО": [
+        {
+            "name": "🌍-команды-для-ботов",
+            "type": "text",
+            "desc": "Всякий мусор для музыки и ботов.",
+        },
+        {
+            "name": "🔒-logs",
+            "type": "text",
+            "desc": "Служебный канал для логов сервера (только для своих).",
+        },
+    ],
+    "🔊 ГОЛОСОВЫЕ КАНАЛЫ": [
+        {
+            "name": "🔥 Основной",
+            "type": "voice",
+            "desc": "Основная комната для посиделок.",
+        },
+        {
+            "name": "🎮 ИГРУЛИ",
+            "type": "voice",
+            "desc": "Святая святых для каток.",
+        },
+        {
+            "name": "⏱️ Дуэт",
+            "type": "voice",
+            "desc": "Приватный войс на двоих.",
+        },
+        {
+            "name": "💀 АФК",
+            "type": "voice",
+            "desc": "Отошел попить чаю или в тильт.",
+        },
+    ],
+    "✨ СЕКРЕТНАЯ ЗОНА": [
+        {
+            "name": "👁️‍🗨️-бункер",
+            "type": "text",
+            "desc": "Секретный схрон строго для Штурмфюрера и Смотрящего.",
+        }
+    ],
+}
+
+
+# Обновление интерактивного статуса
+async def update_server_status(guild):
+    gaming_vc = discord.utils.get(guild.voice_channels, name="🎮 ИГРУЛИ")
+    main_vc = discord.utils.get(guild.voice_channels, name="🔥 Основной")
+    duo_vc = discord.utils.get(guild.voice_channels, name="⏱️ Дуэт")
+
+    gaming_count = len(gaming_vc.members) if gaming_vc else 0
+    main_count = len(main_vc.members) if main_vc else 0
+    duo_count = len(duo_vc.members) if duo_vc else 0
+
+    total = gaming_count + main_count + duo_count
+
+    if total > 0:
+        parts = []
+        if gaming_count > 0:
+            parts.append(f"Игры: {gaming_count}")
+        if main_count > 0:
+            parts.append(f"Общение: {main_count}")
+        if duo_count > 0:
+            parts.append(f"Дуэт: {duo_count}")
+
+        status_text = " | ".join(parts)
+        await bot.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.watching, name=status_text
+            )
+        )
+    else:
+        await bot.change_presence(
+            activity=discord.Game(name="Ждет сбора состава ⚡")
+        )
+
+
+# Фоновая задача: начисление опыта за нахождение в голосовых каналах
+@tasks.loop(minutes=1)
+async def voice_exp_loop():
+    for guild in bot.guilds:
+        for vc in guild.voice_channels:
+            if vc.name == "💀 АФК" or len(vc.members) < 2:
+                continue
+            
+            for member in vc.members:
+                if member.bot:
+                    continue
+                if member.voice and (member.voice.self_mute or member.voice.self_deaf):
+                    continue
+
+                user_id = member.id
+                data = get_user_data(user_id)
+                exp = data["exp"] + 3
+                level = data["level"]
+                exp_needed = level * 100
+
+                if exp >= exp_needed:
+                    level += 1
+                    exp -= exp_needed
+                    rank_title = get_rank_title(level)
+                    
+                    channel = discord.utils.get(guild.text_channels, name="💬-флудилка")
+                    if channel:
+                        await channel.send(
+                            f"🎉 {member.mention} поднял уровень за активность в войсе! Теперь у него **LVL {level}** *({rank_title})*!"
+                        )
+                
+                update_user_data(user_id, exp, level)
+
+
+# Фоновая задача: очистка просроченных временных ролей
+@tasks.loop(minutes=1)
+async def temp_roles_check():
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET exp = ?, level = ?, last_daily = ? WHERE user_id = ?", (exp, level, last_daily, user_id))
+    cursor.execute("SELECT user_id, role_id FROM temp_roles WHERE expires_at <= ?", (now_str,))
+    expired = cursor.fetchall()
+
+    for uid, role_id in expired:
+        for guild in bot.guilds:
+            member = guild.get_member(uid)
+            if member:
+                role = guild.get_role(role_id)
+                if role:
+                    try:
+                        await role.delete(reason="Срок временной роли колеса фортуны истек")
+                    except:
+                        pass
+        cursor.execute("DELETE FROM temp_roles WHERE user_id = ?", (uid,))
+    
     conn.commit()
     conn.close()
 
-def get_rank_title(level: int):
-    if level < 5:
-        return "Салага"
-    elif level < 10:
-        return "Боец"
-    elif level < 20:
-        return "Ветеран"
-    elif level < 35:
-        return "Авторитет"
-    else:
-        return "Легенда улиц"
+
+# Фоновая задача: авто-топ раз в сутки
+@tasks.loop(hours=24)
+async def auto_leaderboard():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, exp, level FROM users ORDER BY level DESC, exp DESC LIMIT 10")
+    top_rows = cursor.fetchall()
+    conn.close()
+
+    if not top_rows:
+        return
+
+    for guild in bot.guilds:
+        channel = discord.utils.get(guild.text_channels, name="💬-флудилка")
+        if not channel:
+            continue
+
+        desc = ""
+        for index, (uid, exp, lvl) in enumerate(top_rows, start=1):
+            member = guild.get_member(uid)
+            name = member.display_name if member else "Боец"
+            rank_title = get_rank_title(lvl)
+            desc += f"**{index}.** {name} — **LVL {lvl}** *({rank_title})* (`{exp} XP`)\n"
+
+        embed = discord.Embed(
+            title="🏆 ТАБЛИЦА РАНГОВ СЕРВЕРА",
+            description=desc,
+            color=0x8B0000,
+        )
+        embed.set_footer(text="Автоматическая сводка • ПРАЧКА ДРАЧКА")
+        await channel.send(embed=embed)
+
+
+@bot.event
+async def on_ready():
+    print(f"Бот {bot.user} в деле!")
+    asyncio.create_task(start_web_server())
+    if not auto_leaderboard.is_running():
+        auto_leaderboard.start()
+    if not voice_exp_loop.is_running():
+        voice_exp_loop.start()
+    if not temp_roles_check.is_running():
+        temp_roles_check.start()
+    for guild in bot.guilds:
+        await update_server_status(guild)
+
+
+@bot.event
+async def on_member_join(member):
+    role = discord.utils.get(member.guild.roles, name="🎮 Боевой товарищ")
+    if role:
+        try:
+            await member.add_roles(role)
+        except Exception as e:
+            print(f"Не удалось выдать роль: {e}")
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    await update_server_status(member.guild)
+
+
+# Обработка текстовых сообщений для начисления опыта
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    user_id = message.author.id
+    data = get_user_data(user_id)
+    exp = data["exp"] + 15
+    level = data["level"]
+    exp_needed = level * 100
+
+    if exp >= exp_needed:
+        level += 1
+        exp -= exp_needed
+        rank_title = get_rank_title(level)
+        await message.channel.send(
+            f"🎉 {message.author.mention} повысил квалификацию! Теперь у него **LVL {level}** *({rank_title})*!"
+        )
+
+    update_user_data(user_id, exp, level)
+    await bot.process_commands(message)
+
+
+# --- ИНТЕРАКТИВНЫЕ МОДАЛЫ И КНОПКИ ---
+
+class CustomRoleModal(Modal, title="Настройка своей временной роли"):
+    role_name = TextInput(
+        label="Название роли",
+        placeholder="Например: Властелин дискорда",
+        max_length=30,
+    )
+    role_color = TextInput(
+        label="Цвет (HEX код, например #FF0000)",
+        placeholder="#FFD700",
+        max_length=7,
+        default="#FFD700"
+    )
+
+    def __init__(self, guild: discord.Guild, member: discord.Member):
+        super().__init__()
+        self.guild = guild
+        self.member = member
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        color_str = self.role_color.value.strip()
+        try:
+            if not color_str.startswith("#"):
+                color_str = "#" + color_str
+            color_val = int(color_str.replace("#", ""), 16)
+            discord_color = discord.Color(color_val)
+        except ValueError:
+            discord_color = discord.Color.gold()
+
+        try:
+            new_role = await self.guild.create_role(
+                name=self.role_name.value,
+                color=discord_color,
+                hoist=True,
+                reason="Победитель Колеса Фортуны"
+            )
+            await self.member.add_roles(new_role)
+
+            expires = (datetime.datetime.now() + datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO temp_roles (user_id, role_id, expires_at)
+                VALUES (?, ?, ?)
+            """, (self.member.id, new_role.id, expires))
+            conn.commit()
+            conn.close()
+
+            await interaction.followup.send(f"✅ Роль **{self.role_name.value}** успешно создана и выдана тебе на 24 часа!", ephemeral=True)
+            
+            general_ch = discord.utils.get(self.guild.text_channels, name="💬-флудилка")
+            if general_ch:
+                await general_ch.send(f"👑 Колесо фортуны выбрало победителем игрока {self.member.mention}! Он забрал эксклюзивную роль **{self.role_name.value}** на 24 часа.")
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ошибка при создании роли: {e}", ephemeral=True)
+
+
+class FortuneWheelView(View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.guild = guild
+        self.participants = set()
+
+    @discord.ui.button(label="🎰 Участвовать в колесе", style=discord.ButtonStyle.success, custom_id="fortune_join")
+    async def join_wheel(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id in self.participants:
+            await interaction.response.send_message("Ты уже в списке участников этого розыгрыша!", ephemeral=True)
+            return
+        
+        self.participants.add(interaction.user.id)
+        await interaction.response.send_message("✅ Ты успешно залетел в колесо фортуны! Жди окончания розыгрыша.", ephemeral=True)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        
+        try:
+            # Проверка лимита: активных временных ролей должно быть не более 15% от состава сервера
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM temp_roles")
+            active_temp_count = cursor.fetchone()[0]
+            conn.close()
+
+            max_allowed = max(1, int(len(self.guild.members) * 0.15))
+
+            if active_temp_count >= max_allowed:
+                general_ch = discord.utils.get(self.guild.text_channels, name="💬-флудилка")
+                if general_ch:
+                    await general_ch.send("🎰 Колесо фортуны прокрутилось, но на сервере уже достигнут лимит временных элитных ролей (15%). Розыгрыш переносится!")
+                return
+
+            if self.participants:
+                winner_id = random.choice(list(self.participants))
+                winner_member = self.guild.get_member(winner_id)
+                if winner_member:
+                    try:
+                        dm_embed = discord.Embed(
+                            title="🎉 ПОЗДРАВЛЯЕМ С ПОБЕДОЙ!",
+                            description="Ты выиграл в **Колесе Фортуны**! Нажми на кнопку ниже, чтобы выбрать кастомное название и цвет своей временной роли на 24 часа.",
+                            color=0x8B0000
+                        )
+                        
+                        class SetupButtonView(View):
+                            def __init__(self, g, m):
+                                super().__init__(timeout=300)
+                                self.g = g
+                                self.m = m
+
+                            @discord.ui.button(label="🛠️ Настроить свою роль", style=discord.ButtonStyle.primary)
+                            async def setup_role_btn(self, inter: discord.Interaction, btn: Button):
+                                await inter.response.send_modal(CustomRoleModal(self.g, self.m))
+
+                        await winner_member.send(embed=dm_embed, view=SetupButtonView(self.guild, winner_member))
+                    except Exception:
+                        fallback_role = await self.guild.create_role(name="⭐ Счастливчик", color=discord.Color.gold(), hoist=True)
+                        await winner_member.add_roles(fallback_role)
+                        expires = (datetime.datetime.now() + datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+                        conn = sqlite3.connect(DB_FILE)
+                        cursor = conn.cursor()
+                        cursor.execute("INSERT OR REPLACE INTO temp_roles (user_id, role_id, expires_at) VALUES (?, ?, ?)", (winner_member.id, fallback_role.id, expires))
+                        conn.commit()
+                        conn.close()
+                        
+                        general_ch = discord.utils.get(self.guild.text_channels, name="💬-флудилка")
+                        if general_ch:
+                            await general_ch.send(f"👑 Колесо фортуны выбрало победителя: {winner_member.mention}! Он получает роль **⭐ Счастливчик**.")
+            else:
+                general_ch = discord.utils.get(self.guild.text_channels, name="💬-флудилка")
+                if general_ch:
+                    await general_ch.send("🎰 Колесо фортуны завершилось, но никто не нажал кнопку участия. Ничья!")
+        except Exception as e:
+            print(f"Ошибка в колесе фортуны: {e}")
+
 
 class HubView(View):
     def __init__(self):
@@ -117,35 +696,37 @@ class HubView(View):
 
     @discord.ui.button(label="📊 Профиль", style=discord.ButtonStyle.primary, custom_id="hub_profile")
     async def profile_button(self, interaction: discord.Interaction, button: Button):
-        target = interaction.user
-        user_data = get_user_data(target.id)
+        user_data = get_user_data(interaction.user.id)
         current_lvl = user_data["level"]
         current_exp = user_data["exp"]
         exp_needed = current_lvl * 100
         rank_title = get_rank_title(current_lvl)
 
-        embed = discord.Embed(title=f"📊 Профиль: {target.name}", color=0x8B0000)
+        embed = discord.Embed(
+            title=f"📊 Профиль: {interaction.user.name}",
+            color=0x8B0000,
+        )
         embed.add_field(name="Звание / Титул", value=f"🛡️ **{rank_title}**", inline=False)
         embed.add_field(name="Уровень", value=f"⭐ **LVL {current_lvl}**", inline=True)
         embed.add_field(name="Опыт", value=f"💬 `{current_exp} / {exp_needed} XP`", inline=True)
-        embed.set_thumbnail(url=target.avatar.url if target.avatar else None)
-        embed.set_footer(text="ПРАЧКА ДРАЧКА • Система уровней")
+        embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else None)
+        embed.set_footer(text="ПРАЧКА ДРАЧКА • Интерактивный хаб")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="🏆 Топ", style=discord.ButtonStyle.success, custom_id="hub_top")
+    @discord.ui.button(label="🏆 Топ игроков", style=discord.ButtonStyle.success, custom_id="hub_top")
     async def top_button(self, interaction: discord.Interaction, button: Button):
-        conn = get_db_connection()
+        conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, exp, level FROM users ORDER BY level DESC, exp DESC LIMIT 10")
         top_rows = cursor.fetchall()
         conn.close()
 
         desc = ""
-        for index, row in enumerate(top_rows, start=1):
-            member = interaction.guild.get_member(row["user_id"])
+        for index, (uid, exp, lvl) in enumerate(top_rows, start=1):
+            member = interaction.guild.get_member(uid)
             name = member.display_name if member else "Боец"
-            rank_title = get_rank_title(row["level"])
-            desc += f"**{index}.** {name} — **LVL {row['level']}** *({rank_title})* (`{row['exp']} XP`)\n"
+            rank_title = get_rank_title(lvl)
+            desc += f"**{index}.** {name} — **LVL {lvl}** *({rank_title})* (`{exp} XP`)\n"
 
         embed = discord.Embed(title="🏆 ТОП-10 БОЙЦОВ СЕРВЕРА", description=desc or "Пока пусто.", color=0x8B0000)
         embed.set_footer(text="ПРАЧКА ДРАЧКА • Таблица лидеров")
@@ -176,35 +757,6 @@ class HubView(View):
         update_user_full(user_id, new_exp, level, today)
         await interaction.response.send_message(msg, ephemeral=True)
 
-class FortuneWheelView(View):
-    def __init__(self, guild: discord.Guild):
-        super().__init__(timeout=60)
-        self.guild = guild
-        self.participants = set()
-
-    @discord.ui.button(label="🎰 Запрыгнуть в розыгрыш", style=discord.ButtonStyle.success, custom_id="wheel_join")
-    async def join_wheel(self, interaction: discord.Interaction, button: Button):
-        if interaction.user in self.participants:
-            await interaction.response.send_message("⚠️ Ты уже участвуешь в розыгрыше!", ephemeral=True)
-            return
-        self.participants.add(interaction.user)
-        await interaction.response.send_message("✅ Ты успешно ворвался в список участников Колеса Фортуны!", ephemeral=True)
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        
-        if not self.participants:
-            return
-
-        winner = random.choice(list(self.participants))
-        role = discord.utils.get(self.guild.roles, name="⚡ Штурмфюрер")
-        
-        if role:
-            try:
-                await winner.add_roles(role)
-            except:
-                pass
 
 class DuelAcceptView(View):
     def __init__(self, challenger: discord.Member, target: discord.Member, bet: int):
@@ -232,6 +784,7 @@ class DuelAcceptView(View):
         self.stop()
         await interaction.response.send_message(f"🛡️ {self.target.mention} благоразумно уклонился от драки.", ephemeral=False)
 
+
 class SborView(View):
     def __init__(self, game_name: str):
         super().__init__(timeout=None)
@@ -250,8 +803,12 @@ class SborView(View):
         await interaction.message.edit(embed=embed)
         await interaction.response.send_message("✅ Ты записан в состав!", ephemeral=True)
 
-@bot.command(name="команды", aliases=["помощь", "commands"])
+
+# --- РУССКОЯЗЫЧНЫЕ КОМАНДЫ ---
+
+@bot.command(name="команды", aliases=["help", "помощь"])
 async def commands_list(ctx):
+    # Проверяем, есть ли у пользователя права администратора/модератора
     is_staff = any(role.name in ["⚡ Штурмфюрер", "👁️ Смотрящий"] for role in ctx.author.roles) or ctx.author.guild_permissions.administrator
 
     embed = discord.Embed(
@@ -260,17 +817,19 @@ async def commands_list(ctx):
         color=0x8B0000
     )
 
+    # Общие команды для всех
     general_cmds = (
         "`!профиль` (или `!ур`) — Показать твой уровень, звание и опыт.\n"
         "`!топ` (или `!лидеры`) — Таблица топ-10 игроков сервера.\n"
         "`!ежедневка` (или `!бонус`) — Забрать ежедневную награду (XP).\n"
         "`!казино [ставка]` (или `!кости`) — Сыграть в кости на XP против бота (ставка от 10 до 500).\n"
         "`!дуэль @Юзер [ставка]` (или `!махач`) — Устроить уличный замес на XP с другим бойцом.\n"
-        "`!матч [ID]` (или `!стратз`) — Анализ матча Dota 2 по ID через STRATZ API.\n"
+        "`!матч [ID]` (или `!стратз`) — Анализ матча Dota 2 через STRATZ API.\n"
         "`!команды` (или `!помощь`) — Вызвать это справочное меню в ЛС."
     )
     embed.add_field(name="⭐ Игровые и общие команды", value=general_cmds, inline=False)
 
+    # Админ/модер команды (показываются только если есть права)
     if is_staff:
         staff_cmds = (
             "`!хаб` — Отправить интерактивную панель управления.\n"
@@ -289,9 +848,12 @@ async def commands_list(ctx):
     try:
         await ctx.author.send(embed=embed)
         await ctx.message.delete()
-        await ctx.send(f"📬 {ctx.author.mention}, список доступных команд отправлен тебе в личные сообщения!", delete_after=6)
+        # Уведомление в чате, что справка отправлена в ЛС
+        temp_msg = await ctx.send(f"📬 {ctx.author.mention}, список доступных команд отправлен тебе в личные сообщения!", delete_after=6)
     except discord.Forbidden:
+        # Если у юзера закрыты ЛС, выводим прямо в канал
         await ctx.send(f"⚠️ {ctx.author.mention}, у тебя закрыты личные сообщения! Открой их, чтобы получать справку, либо смотри сюда:", embed=embed)
+
 
 @bot.command(name="хаб", aliases=["hub"])
 @commands.has_permissions(administrator=True)
@@ -307,6 +869,7 @@ async def hub(ctx):
         await ctx.message.delete()
     except:
         pass
+
 
 @bot.command(name="ежедневка", aliases=["daily", "бонус"])
 async def daily(ctx):
@@ -332,6 +895,7 @@ async def daily(ctx):
 
     update_user_full(user_id, new_exp, level, today)
     await ctx.send(msg)
+
 
 @bot.command(name="казино", aliases=["roll", "кости", "рулетка"])
 async def roll(ctx, bet: int = 50):
@@ -365,6 +929,7 @@ async def roll(ctx, bet: int = 50):
     update_user_data(user_id, exp, level)
     await ctx.send(f"{ctx.author.mention}\n{result}")
 
+
 @bot.command(name="профиль", aliases=["lvl", "ур"])
 async def lvl(ctx, member: discord.Member = None):
     target = member or ctx.author
@@ -389,114 +954,26 @@ async def lvl(ctx, member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
+
 @bot.command(name="топ", aliases=["top", "лидеры"])
 async def top(ctx):
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, exp, level FROM users ORDER BY level DESC, exp DESC LIMIT 10")
     top_rows = cursor.fetchall()
     conn.close()
 
     desc = ""
-    for index, row in enumerate(top_rows, start=1):
-        member = ctx.guild.get_member(row["user_id"])
+    for index, (uid, exp, lvl) in enumerate(top_rows, start=1):
+        member = ctx.guild.get_member(uid)
         name = member.display_name if member else "Боец"
-        rank_title = get_rank_title(row["level"])
-        desc += f"**{index}.** {name} — **LVL {row['level']}** *({rank_title})* (`{row['exp']} XP`)\n"
+        rank_title = get_rank_title(lvl)
+        desc += f"**{index}.** {name} — **LVL {lvl}** *({rank_title})* (`{exp} XP`)\n"
 
     embed = discord.Embed(title="🏆 ТОП-10 БОЙЦОВ СЕРВЕРА", description=desc or "Пока пусто.", color=0x8B0000)
     embed.set_footer(text="ПРАЧКА ДРАЧКА • Таблица лидеров")
     await ctx.send(embed=embed)
 
-@bot.command(name="матч", aliases=["match", "стратз"])
-async def match_stats(ctx, match_id: int):
-    query = """
-    {
-      match(id: %d) {
-        id
-        didRadiantWin
-        duration
-        gameMode
-        startDateTime
-        players {
-          isRadiant
-          heroId
-          playerStat {
-            kda
-            gpm
-            xpm
-            networth
-          }
-          steamAccount {
-            name
-          }
-        }
-      }
-    }
-    """ % match_id
-
-    headers = {
-        "Authorization": f"Bearer {STRATZ_TOKEN}",
-        "Content-Type": "application/json",
-        "User-Agent": "StratzDiscordBot"
-    }
-
-    async with ctx.typing():
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(STRATZ_API_URL, json={"query": query}, headers=headers) as response:
-                    if response.status != 200:
-                        await ctx.send(f"❌ Ошибка соединения со STRATZ API (Код: {response.status})", delete_after=7)
-                        return
-                    
-                    data = await response.json()
-                    
-                    if "errors" in data:
-                        await ctx.send(f"⚠️ Ошибка в запросе к API: {data['errors'][0]['message']}", delete_after=7)
-                        return
-
-                    match_data = data.get("data", {}).get("match")
-                    if not match_data:
-                        await ctx.send(f"❌ Матч с ID `{match_id}` не найден или еще не обработан парсером.", delete_after=7)
-                        return
-
-                    radiant_win = match_data.get("didRadiantWin")
-                    duration_min = match_data.get("duration", 0) // 60
-                    duration_sec = match_data.get("duration", 0) % 60
-                    
-                    winner_text = "🟢 Победа Сил Света (Radiant)" if radiant_win else "🔴 Победа Сил Тьмы (Dire)"
-                    embed_color = 0x57F287 if radiant_win else 0xED4245
-
-                    embed = discord.Embed(
-                        title=f"📊 Анализ матча Dota 2 #{match_id}",
-                        description=f"**Итог:** {winner_text}\n**Длительность:** {duration_min} мин. {duration_sec} сек.",
-                        color=embed_color
-                    )
-
-                    radiant_players = []
-                    dire_players = []
-
-                    for p in match_data.get("players", []):
-                        name = p.get("steamAccount") and p.get("steamAccount").get("name") or "Аноним"
-                        stat = p.get("playerStat") or {}
-                        kda = stat.get("kda", "N/A")
-                        gpm = stat.get("gpm", 0)
-                        
-                        player_line = f"• **{name}** — KDA: `{kda}` | GPM: `{gpm}`"
-                        
-                        if p.get("isRadiant"):
-                            radiant_players.append(player_line)
-                        else:
-                            dire_players.append(player_line)
-
-                    embed.add_field(name="🟢 Radiant", value="\n".join(radiant_players[:5]) or "Нет данных", inline=False)
-                    embed.add_field(name="🔴 Dire", value="\n".join(dire_players[:5]) or "Нет данных", inline=False)
-                    embed.set_footer(text="ПРАЧКА ДРАЧКА • Аналитика STRATZ API")
-
-                    await ctx.send(embed=embed)
-
-        except Exception as e:
-            await ctx.send(f"❌ Произошла ошибка при запросе: {e}", delete_after=7)
 
 @bot.command(name="колесо", aliases=["wheel"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
@@ -514,6 +991,7 @@ async def wheel(ctx):
         await ctx.message.delete()
     except:
         pass
+
 
 @bot.command(name="дуэль", aliases=["duel", "драка", "махач"])
 async def duel(ctx, member: discord.Member, bet: int = 50):
@@ -657,6 +1135,7 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
     embed.description = "\n".join(round_logs) + f"\n\n-------------------\n{result_text}"
     await msg.edit(content=None, embed=embed, view=None)
 
+
 @bot.command(name="настройка", aliases=["setup"])
 @commands.has_permissions(administrator=True)
 async def setup(ctx):
@@ -702,6 +1181,7 @@ async def setup(ctx):
         "✅ Всё готово! Сервер полностью укомплектован под совместные катки."
     )
 
+
 @bot.command(name="сбор", aliases=["call"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def сбор(ctx, *, game_name: str = "в катку"):
@@ -729,6 +1209,7 @@ async def сбор(ctx, *, game_name: str = "в катку"):
     except:
         pass
 
+
 @bot.command(name="очистить", aliases=["clear"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def clear(ctx, amount: int = 10):
@@ -739,6 +1220,7 @@ async def clear(ctx, amount: int = 10):
             f"🧹 **[ОЧИСТКА]** В канале {ctx.channel.mention} стерто {amount}"
             f" сообщений ({ctx.author.mention})."
         )
+
 
 @bot.command(name="мут", aliases=["mute"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
@@ -762,6 +1244,7 @@ async def mute(
     except Exception as e:
         await ctx.send(f"Не удалось выдать мут: {e}", delete_after=5)
 
+
 @bot.command(name="кик", aliases=["kick"])
 @commands.has_any_role("⚡ Штурмфюрер", "👁️ Смотрящий")
 async def kick(ctx, member: discord.Member, *, reason="Нарушение правил"):
@@ -778,17 +1261,8 @@ async def kick(ctx, member: discord.Member, *, reason="Нарушение пра
     except Exception as e:
         await ctx.send(f"Не удалось кикнуть: {e}", delete_after=5)
 
+
 @bot.command(name="секрет", aliases=["secret"])
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", lambda r: web.Response(text="Bot is running!"))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
 async def secret(ctx):
     allowed_roles = ["⚡ Штурмфюрер", "👁️ Смотрящий"]
     has_access = any(role.name in allowed_roles for role in ctx.author.roles)
@@ -823,12 +1297,10 @@ async def secret(ctx):
     except:
         pass
 
-async def main():
-    await start_web_server()
-    # Укажите вашу переменную токена, если она называется иначе (например, TOKEN или DISCORD_TOKEN)
-    token = os.environ.get("DISCORD_TOKEN") 
-    await bot.start(token)
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    token = os.getenv("TOKEN")
+    if not token:
+        print("Ошибка: Токен не найден в переменных окружения TOKEN!")
+    else:
+        bot.run(token)

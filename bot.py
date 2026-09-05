@@ -12,6 +12,7 @@ from discord.ui import View, Button, Modal, TextInput
 from aiohttp import web
 from difflib import get_close_matches
 from google import genai
+from google.genai.errors import APIError
 
 intents = discord.Intents.default()
 intents.guilds = True
@@ -230,6 +231,16 @@ def build_match_embed(match_data: dict, match_id: int) -> discord.Embed:
     embed.set_footer(text="Данные предоставлены OpenDota API")
     return embed
 
+async def generate_with_retry(client, model, contents, retries=3, delay=2):
+    for attempt in range(retries):
+        try:
+            return client.models.generate_content(model=model, contents=contents)
+        except APIError as e:
+            if e.code == 503 and attempt < retries - 1:
+                await asyncio.sleep(delay * (attempt + 1))
+                continue
+            raise e
+
 @bot.command(name="контра", aliases=["counter"])
 async def counter_command(ctx, hero_name: str, *, enemies_str: str):
     async with ctx.typing():
@@ -246,9 +257,11 @@ async def counter_command(ctx, hero_name: str, *, enemies_str: str):
                 f"4. План на драку (кого фокусить, как позиционироваться)."
             )
 
-            response = ai_client.models.generate_content(
-                model='gemini-3.6-flash',
-                contents=prompt,
+            # Используем безопасный вызов с автоповтором при 503 ошибке
+            response = await generate_with_retry(
+                ai_client, 
+                'gemini-3.6-flash', 
+                contents=prompt
             )
             
             ai_text = response.text

@@ -1767,7 +1767,6 @@ async def meta_command(ctx):
                         return
                     heroes_data = await resp.json()
 
-            # Обрабатываем винрейт для каждого героя
             processed_heroes = []
             for h in heroes_data:
                 name = h.get('localized_name', 'Unknown')
@@ -1784,22 +1783,29 @@ async def meta_command(ctx):
                     "picks": pub_pick
                 })
 
-            # Функция для отбора топ-3 по роли
-            def get_top_by_role(role_name, min_picks=1000):
+            # Множество для отслеживания уже выведенных героев, чтобы они не повторялись
+            used_heroes = set()
+
+            def get_top_unique(role_name, count=3, min_picks=800):
                 filtered = [
                     h for h in processed_heroes 
-                    if role_name in h['roles'] and h['picks'] > min_picks
+                    if role_name in h['roles'] and h['picks'] > min_picks and h['name'] not in used_heroes
                 ]
                 filtered.sort(key=lambda x: x['winrate'], reverse=True)
-                top = filtered[:3]
-                if not top:
-                    return "Нет данных"
-                return ", ".join([f"**{h['name']}** ({h['winrate']:.1f}%)" for h in top])
+                top = filtered[:count]
+                
+                result = []
+                for h in top:
+                    used_heroes.add(h['name']) # Добавляем в использованные, чтобы не дублировать
+                    result.append(f"**{h['name']}** ({h['winrate']:.1f}%)")
+                
+                return ", ".join(result) if result else "Нет данных"
 
-            carry_top = get_top_by_role("Carry")
-            mid_top = get_top_by_role("Nuker") # Или через Escape/Initiator, но Nuker/Disabler ближе к миду
-            off_top = get_top_by_role("Durable")
-            supp_top = get_top_by_role("Support")
+            # Распределяем по ролям последовательно (Керри -> Мид -> Оффлейн -> Саппорты)
+            carry_top = get_top_unique("Carry", count=3)
+            mid_top = get_top_unique("Nuker", count=3)
+            off_top = get_top_unique("Initiator", count=3) # Инициаторы чаще всего идут в оффлейн
+            supp_top = get_top_unique("Support", count=3)
 
             embed = discord.Embed(
                 title="📈 Актуальная мета патча (Топ героев по позициям)",

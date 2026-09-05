@@ -1650,7 +1650,7 @@ async def hero_command(ctx, *, hero_query: str):
                 await ctx.send(f"❌ Герой **{hero_query}** не найден.")
                 return
 
-            # OpenDota отдает готовый путь прямо в ключе 'img', например: /apps/dota2/images/heroes/muerta_full.png
+            # ИЗМЕНЕНИЕ ЗДЕСЬ: берем чистый системный ключ и собираем ссылку через cdn.opendota.com
             hero_name_clean = target_hero.get('name', '').replace('npc_dota_hero_', '')
             image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_name_clean}_full.png"
 

@@ -1670,8 +1670,24 @@ async def hero_command(ctx, *, hero_query: str):
             )
             embed.set_thumbnail(url=image_url)
             
+            # Словари переводов
             attr_map = {"str": "Сила 💪", "agi": "Ловкость 🏃‍♂️", "int": "Интеллект 🧠", "all": "Универсальный ✨"}
             primary_attr = attr_map.get(target_hero.get('primary_attr'), "Неизвестно")
+
+            attack_map = {"Melee": "Ближний бой ⚔️", "Ranged": "Дальний бой 🏹"}
+            attack_type = attack_map.get(target_hero.get('attack_type', ''), target_hero.get('attack_type', 'Неизвестно'))
+
+            roles_map = {
+                "Carry": "Керри",
+                "Support": "Саппорт",
+                "Nuker": "Нюкер",
+                "Disabler": "Дизейблер",
+                "Durable": "Тяжеловес",
+                "Escape": "Эскейпер",
+                "Pusher": "Пушер",
+                "Initiator": "Инициатор",
+                "Jungler": "Лесник"
+            }
 
             pro_pick = target_hero.get('pro_pick', 0)
             pro_ban = target_hero.get('pro_ban', 0)
@@ -1680,8 +1696,9 @@ async def hero_command(ctx, *, hero_query: str):
             pub_win = sum(target_hero.get(f'{i}_win', 0) for i in range(1, 9))
             pub_winrate = f"{(pub_win / pub_pick * 100):.1f}%" if pub_pick > 0 else "Нет данных"
 
-            roles_dict = target_hero.get('roles', [])
-            roles_str = ", ".join(roles_dict) if roles_dict else "Универсал"
+            raw_roles = target_hero.get('roles', [])
+            translated_roles = [roles_map.get(role, role) for role in raw_roles]
+            roles_str = ", ".join(translated_roles) if translated_roles else "Универсал"
 
             def get_names_from_dict(sub_dict):
                 if not sub_dict or not isinstance(sub_dict, dict):
@@ -1708,7 +1725,7 @@ async def hero_command(ctx, *, hero_query: str):
             )
 
             embed.add_field(name="Основной атрибут", value=primary_attr, inline=True)
-            embed.add_field(name="Атакующий тип", value=target_hero.get('attack_type', 'Неизвестно'), inline=True)
+            embed.add_field(name="Атакующий тип", value=attack_type, inline=True)
             embed.add_field(name="🎯 Роли", value=roles_str, inline=True)
             
             embed.add_field(name="📊 Винрейт в пабликах", value=pub_winrate, inline=True)

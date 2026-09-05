@@ -16,6 +16,56 @@ intents.guilds = True
 intents.message_content = True
 intents.members = True
 
+from difflib import get_close_matches
+
+# Словарь прозвищ героев
+HERO_ALIASES = {
+    "сф": "Shadow Fiend", "ам": "Anti-Mage", "па": "Phantom Assassin", "мортред": "Phantom Assassin",
+    "джагер": "Juggernaut", "джаггер": "Juggernaut", "войд": "Faceless Void", "бс": "Bloodseeker",
+    "войд спирит": "Void Spirit", "шторм": "Storm Spirit", "эмбер": "Ember Spirit",
+    "фурион": "Nature's Prophet", "профет": "Nature's Prophet", "урса": "Ursa", "тини": "Tiny",
+    "акс": "Axe", "пудж": "Pudge", "лион": "Lion", "шаман": "Shadow Shaman", "смайл": "Shadow Shaman",
+    "цм": "Crystal Maiden", "кристалка": "Crystal Maiden", "рулай": "Crystal Maiden",
+    "висп": "Io", "ио": "Io", "гуля": "Lifestealer", "наикс": "Lifestealer", "сларк": "Slark",
+    "морф": "Morphling", "морфлинг": "Morphling", "тинкер": "Tinker", "тикер": "Tinker",
+    "тракса": "Drow Ranger", "дровка": "Drow Ranger", "рубик": "Rubick", "пугна": "Pugna",
+    "оракул": "Oracle", "дазл": "Dazzle", "зомби": "Undying", "андаинг": "Undying",
+    "алхимик": "Alchemist", "алх": "Alchemist", "бруда": "Broodmother", "паук": "Broodmother",
+    "веномансер": "Venomancer", "вено": "Venomancer", "вивер": "Weaver", "жук": "Weaver",
+    "спектра": "Spectre", "та": "Templar Assassin", "тезла": "Templar Assassin", "потма": "Mirana",
+    "мирена": "Mirana", "луна": "Luna", "магнус": "Magnus", "марси": "Marci", "мипо": "Meepo",
+    "некр": "Necrophos", "некрофос": "Necrophos", "никс": "Nyx Assassin", "огр": "Ogre Magi",
+    "омник": "Omniknight", "пак": "Puck", "лина": "Lina", "лешрак": "Leshrac", "леш": "Leshrac",
+    "баратрум": "Spirit Breaker", "корова": "Spirit Breaker", "сб": "Spirit Breaker",
+    "свен": "Sven", "тайд": "Tidehunter", "тролль": "Troll Warlord", "туск": "Tusk",
+    "пл": "Phantom Lancer", "лансер": "Phantom Lancer", "венга": "Vengeful Spirit",
+    "висаж": "Visage", "вайпер": "Viper", "вр": "Windranger", "виндренджер": "Windranger",
+    "муерта": "Muerta", "зрада": "Muerta", "инвокер": "Invoker", "зевс": "Zeus", "зейв": "Zeus",
+    "кент": "Centaur Warrunner", "кентавр": "Centaur Warrunner", "кунка": "Kunkka", "бист": "Primal Beast",
+    "тайд": "Tidehunter", "батрайдер": "Batrider", "клок": "Clockwerk", "котл": "Keeper of the Light",
+    "тб": "Terrorblade", "террорблейд": "Terrorblade", "вд": "Witch Doctor", "варлок": "Warlock"
+}
+
+# Функция поиска (её обязательно нужно объявить ДО команд бота)
+def find_hero_by_query(query: str, heroes_data: list):
+    query_clean = query.strip().lower()
+    if query_clean in HERO_ALIASES:
+        query_clean = HERO_ALIASES[query_clean].lower()
+
+    for h in heroes_data:
+        eng_name = h.get("name", "").replace("npc_dota_hero_", "").lower()
+        loc_name = h.get("localized_name", "").lower()
+        if query_clean == eng_name or query_clean == loc_name:
+            return h
+
+    all_names = {h.get("localized_name").lower(): h for h in heroes_data}
+    close_matches = get_close_matches(query_clean, all_names.keys(), n=1, cutoff=0.5)
+    
+    if close_matches:
+        return all_names[close_matches[0]]
+    
+    return None
+
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # ============================================================

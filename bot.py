@@ -1650,7 +1650,6 @@ async def hero_command(ctx, *, hero_query: str):
                 await ctx.send(f"❌ Герой **{hero_query}** не найден.")
                 return
 
-            # ИСПРАВЛЕННАЯ ССЫЛКА НА STEAM CDN
             hero_name_clean = target_hero.get('name', '').replace('npc_dota_hero_', '')
             image_url = f"https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/{hero_name_clean}.png"
 
@@ -1663,9 +1662,31 @@ async def hero_command(ctx, *, hero_query: str):
             attr_map = {"str": "Сила 💪", "agi": "Ловкость 🏃‍♂️", "int": "Интеллект 🧠", "all": "Универсальный ✨"}
             primary_attr = attr_map.get(target_hero.get('primary_attr'), "Неизвестно")
 
+            pro_pick = target_hero.get('pro_pick', 0)
+            pro_win = target_hero.get('pro_win', 0)
+            pro_ban = target_hero.get('pro_ban', 0)
+            
+            pub_pick = (target_hero.get('1_pick', 0) + target_hero.get('2_pick', 0) + 
+                        target_hero.get('3_pick', 0) + target_hero.get('4_pick', 0) + 
+                        target_hero.get('5_pick', 0) + target_hero.get('6_pick', 0) + 
+                        target_hero.get('7_pick', 0) + target_hero.get('8_pick', 0))
+            
+            pub_win = (target_hero.get('1_win', 0) + target_hero.get('2_win', 0) + 
+                       target_hero.get('3_win', 0) + target_hero.get('4_win', 0) + 
+                       target_hero.get('5_win', 0) + target_hero.get('6_win', 0) + 
+                       target_hero.get('7_win', 0) + target_hero.get('8_win', 0))
+
+            pub_winrate = f"{(pub_win / pub_pick * 100):.1f}%" if pub_pick > 0 else "Нет данных"
+
             embed.add_field(name="Основной атрибут", value=primary_attr, inline=True)
             embed.add_field(name="Атакующий тип", value=target_hero.get('attack_type', 'Неизвестно'), inline=True)
-            embed.set_footer(text=f"ID героя: {target_hero.get('id')}")
+            embed.add_field(name="\u200b", value="\u200b", inline=True)
+            
+            embed.add_field(name="📊 Винрейт в пабликах", value=pub_winrate, inline=True)
+            embed.add_field(name="🏆 Про-пики / Баны", value=f"👤 {pro_pick} / 🚫 {pro_ban}", inline=True)
+            embed.add_field(name="🔥 Про-победы", value=f"{pro_win} матчей", inline=True)
+
+            embed.set_footer(text=f"ID героя: {target_hero.get('id')} | Данные текущей меты OpenDota")
 
             await ctx.send(embed=embed)
 

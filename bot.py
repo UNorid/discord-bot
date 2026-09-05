@@ -67,7 +67,7 @@ async def counter_command(ctx, hero_name: str, *, enemies_str: str):
             )
 
             response = ai_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.6-flash',
                 contents=prompt,
             )
             

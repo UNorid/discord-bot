@@ -1650,11 +1650,12 @@ async def hero_info(ctx, *, hero_name: str):
                 color=0x8B0000
             )
 
-            # Формируем правильную ссылку на картинку
-            hero_code_name = target_hero.get('name', '').replace('npc_dota_hero_', '')
-            image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_code_name}_full.png"
+            # Берем готовый путь прямо из поля 'img' ответа OpenDota
+            # Пример ключа: /apps/dota2/images/heroes/muerta_full.png
+            img_path = target_hero.get('img', '')
+            image_url = f"https://api.opendota.com{img_path}"
             
-            # ТЕСТОВО ИСПОЛЬЗУЕМ THUMBNAIL (маленькая иконка справа вместо большой картинки)
+            # Устанавливаем картинку в виде миниатюры справа
             embed.set_thumbnail(url=image_url)
 
             attr_map = {"str": "Сила 💪", "agi": "Ловкость 🏃‍♂️", "int": "Интеллект 🧠", "all": "Универсальный ✨"}

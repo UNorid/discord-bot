@@ -1631,34 +1631,46 @@ async def secret(ctx):
 
 @bot.command(name="герой", aliases=["hero"])
 async def hero_command(ctx, *, hero_query: str):
-    await load_hero_names()
-    
-    # Ищем ID героя по введенному имени
-    hero_id = resolve_hero_id(hero_query) if 'resolve_hero_id' in globals() else None
-    
-    # Если функция поиска по имени не объявлена отдельно, пройдемся прямо по кэшу
-    if not hero_id and HERO_NAMES_CACHE:
-        for hid, hdata in HERO_NAMES_CACHE.items():
-            if hdata.get("localized_name", "").lower() == hero_query.lower():
-                hero_id = hid
-                break
+    async with ctx.typing():
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://api.opendota.com/api/heroStats") as resp:
+                    if resp.status != 200:
+                        await ctx.send("❌ Не удалось получить данные от OpenDota.")
+                        return
+                    heroes_data = await resp.json()
 
-    if not hero_id:
-        await ctx.send(f"❌ Герой **{hero_query}** не найден. Проверь название.")
-        return
+            target_hero = None
+            for h in heroes_data:
+                if h.get("localized_name", "").lower() == hero_query.lower():
+                    target_hero = h
+                    break
 
-    hero_name = get_hero_name(hero_id)
-    hero_code_name = hero_name.lower().replace(" ", "_").replace("'", "")
-    image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_code_name}_full.png"
+            if not target_hero:
+                await ctx.send(f"❌ Герой **{hero_query}** не найден.")
+                return
 
-    embed = discord.Embed(
-        title=f"🛡️ Разбор героя: {hero_name}",
-        color=0x8B0000
-    )
-    embed.set_thumbnail(url=image_url)
-    embed.set_footer(text=f"ID героя в системе: {hero_id}")
+            # OpenDota отдает готовый путь прямо в ключе 'img', например: /apps/dota2/images/heroes/muerta_full.png
+            img_path = target_hero.get('img', '')
+            image_url = f"https://api.opendota.com{img_path}"
 
-    await ctx.send(embed=embed)
+            embed = discord.Embed(
+                title=f"🛡️ Разбор героя: {target_hero['localized_name']}",
+                color=0x8B0000
+            )
+            embed.set_thumbnail(url=image_url)
+            
+            attr_map = {"str": "Сила 💪", "agi": "Ловкость 🏃‍♂️", "int": "Интеллект 🧠", "all": "Универсальный ✨"}
+            primary_attr = attr_map.get(target_hero.get('primary_attr'), "Неизвестно")
+
+            embed.add_field(name="Основной атрибут", value=primary_attr, inline=True)
+            embed.add_field(name="Атакующий тип", value=target_hero.get('attack_type', 'Неизвестно'), inline=True)
+            embed.set_footer(text=f"ID героя: {target_hero.get('id')}")
+
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"⚠️ Ошибка: `{e}`")
 
 if __name__ == "__main__":
     token = os.getenv("TOKEN")

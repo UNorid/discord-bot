@@ -1634,15 +1634,11 @@ async def hero_command(ctx, *, hero_query: str):
     async with ctx.typing():
         try:
             async with aiohttp.ClientSession() as session:
-                # 1. Загружаем список героев и константы предметов OpenDota
                 async with session.get("https://api.opendota.com/api/heroStats") as resp:
                     if resp.status != 200:
                         await ctx.send("❌ Не удалось получить данные от OpenDota.")
                         return
                     heroes_data = await resp.json()
-
-                async with session.get("https://api.opendota.com/api/constants/items") as item_const_resp:
-                    items_const = await item_const_resp.json() if item_const_resp.status == 200 else {}
 
             target_hero = None
             for h in heroes_data:
@@ -1658,7 +1654,7 @@ async def hero_command(ctx, *, hero_query: str):
             hero_name_clean = target_hero.get('name', '').replace('npc_dota_hero_', '')
             image_url = f"https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/{hero_name_clean}.png"
 
-            # 2. Подтягиваем популярные предметы конкретного героя
+            # Получаем популярность предметов по ID
             items_data = {}
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"https://api.opendota.com/api/heroes/{hero_id}/itemPopularity") as item_resp:
@@ -1684,23 +1680,25 @@ async def hero_command(ctx, *, hero_query: str):
             roles_dict = target_hero.get('roles', [])
             roles_str = ", ".join(roles_dict) if roles_dict else "Универсал"
 
-            # 3. Функция для перевода ID предметов в читаемые названия через словарь OpenDota
-            def get_item_names(item_dict):
-                if not item_dict or not isinstance(item_dict, dict):
-                    return "Стандартный закуп"
-                # Сортируем предметы по популярности (количеству матчей)
-                sorted_items = sorted(item_dict.items(), key=lambda x: x[1], reverse=True)[:3]
+            # Функция перевода через твой глобальный кеш предметов ITEM_NAMES_CACHE
+            def get_names_from_dict(sub_dict):
+                if not sub_dict or not isinstance(sub_dict, dict):
+                    return "По ситуации"
+                # Сортируем по количеству матчей/популярности
+                sorted_items = sorted(sub_dict.items(), key=lambda x: x[1], reverse=True)[:3]
                 names = []
-                for item_id, count in sorted_items:
-                    # В константах ключ может быть строкой ID
-                    item_info = items_const.get(item_id, {})
-                    readable_name = item_info.get('dname', item_id)
-                    names.append(readable_name)
+                for item_id_str, count in sorted_items:
+                    try:
+                        item_id = int(item_id_str)
+                        name = ITEM_NAMES_CACHE.get(item_id, f"Предмет #{item_id}")
+                        names.append(name)
+                    except ValueError:
+                        continue
                 return ", ".join(names) if names else "По ситуации"
 
-            early_items = get_item_names(items_data.get('start_game_items', {}))
-            core_items = get_item_names(items_data.get('mid_game_items', {}))
-            late_items = get_item_names(items_data.get('late_game_items', {}))
+            early_items = get_names_from_dict(items_data.get('start_game_items', {}))
+            core_items = get_names_from_dict(items_data.get('mid_game_items', {}))
+            late_items = get_names_from_dict(items_data.get('late_game_items', {}))
 
             items_text = (
                 f"🟢 **Старт (0-10 мин):** {early_items}\n"
@@ -1718,7 +1716,7 @@ async def hero_command(ctx, *, hero_query: str):
 
             embed.add_field(name="🎒 Сборки по таймингам", value=items_text, inline=False)
 
-            embed.set_footer(text=f"ID героя: {hero_id} | Автоматический мета-анализ для всех героев")
+            embed.set_footer(text=f"ID героя: {hero_id} | Мета-анализ OpenDota")
 
             await ctx.send(embed=embed)
 

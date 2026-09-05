@@ -1633,6 +1633,10 @@ async def secret(ctx):
 async def hero_command(ctx, *, hero_query: str):
     async with ctx.typing():
         try:
+            # Убедимся, что кеш названий предметов загружен
+            if 'load_item_names' in globals() and callable(load_item_names):
+                await load_item_names()
+
             async with aiohttp.ClientSession() as session:
                 async with session.get("https://api.opendota.com/api/heroStats") as resp:
                     if resp.status != 200:
@@ -1654,7 +1658,6 @@ async def hero_command(ctx, *, hero_query: str):
             hero_name_clean = target_hero.get('name', '').replace('npc_dota_hero_', '')
             image_url = f"https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/{hero_name_clean}.png"
 
-            # Получаем популярность предметов по ID
             items_data = {}
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"https://api.opendota.com/api/heroes/{hero_id}/itemPopularity") as item_resp:
@@ -1680,11 +1683,9 @@ async def hero_command(ctx, *, hero_query: str):
             roles_dict = target_hero.get('roles', [])
             roles_str = ", ".join(roles_dict) if roles_dict else "Универсал"
 
-            # Функция перевода через твой глобальный кеш предметов ITEM_NAMES_CACHE
             def get_names_from_dict(sub_dict):
                 if not sub_dict or not isinstance(sub_dict, dict):
                     return "По ситуации"
-                # Сортируем по количеству матчей/популярности
                 sorted_items = sorted(sub_dict.items(), key=lambda x: x[1], reverse=True)[:3]
                 names = []
                 for item_id_str, count in sorted_items:
@@ -1701,9 +1702,9 @@ async def hero_command(ctx, *, hero_query: str):
             late_items = get_names_from_dict(items_data.get('late_game_items', {}))
 
             items_text = (
-                f"🟢 **Старт (0-10 мин):** {early_items}\n"
-                f"🟡 **Мидгейм (10-25 мин):** {core_items}\n"
-                f"🔴 **Лейт (25+ мин):** {late_items}"
+                f"🟢 **Старт:** {early_items}\n"
+                f"🟡 **Мидгейм:** {core_items}\n"
+                f"🔴 **Лейт:** {late_items}"
             )
 
             embed.add_field(name="Основной атрибут", value=primary_attr, inline=True)

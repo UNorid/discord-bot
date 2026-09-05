@@ -1926,11 +1926,14 @@ async def start_web_server():
     await site.start()
 
 # А в блоке запуска перепиши так:
-if __name__ == "__main__":
+async def main():
+    loop = asyncio.get_running_loop()
+    loop.create_task(start_web_server())
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
         print("Ошибка: Токен не найден в переменных окружения DISCORD_TOKEN!")
     else:
-        loop = asyncio.get_event_loop()
-        loop.create_task(start_web_server())
-        bot.run(token)
+        await bot.start(token)
+
+if __name__ == "__main__":
+    asyncio.run(main())

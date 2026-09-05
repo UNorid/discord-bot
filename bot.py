@@ -50,52 +50,6 @@ ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-@bot.command(name="контра", aliases=["counter"])
-async def counter_command(ctx, hero_name: str, *, enemies_str: str):
-    async with ctx.typing():
-        try:
-            prompt = (
-                f"Ты профессиональный киберспортивный аналитик по Dota 2. "
-                f"Игрок пикает героя: {hero_name}. "
-                f"Вражеский пик: {enemies_str}. "
-                f"Дай краткий, но максимально экспертный разбор матчапа на русском языке. "
-                f"Структурируй ответ строго по пунктам: "
-                f"1. Главная угроза от вражеского пика для этого героя. "
-                f"2. Оптимальный порядок предметов (мидгейм и лейт, строго без промежуточных компонентов вроде Mithril Hammer или Crystalys). "
-                f"3. Ключевые контр-предметы под этот конкретный пик (с пояснением зачем они нужны). "
-                f"4. План на драку (кого фокусить, как позиционироваться)."
-            )
-
-            response = ai_client.models.generate_content(
-                model='gemini-3.6-flash',
-                contents=prompt,
-            )
-            
-            ai_text = response.text
-
-            embed = discord.Embed(
-                title=f"⚔️ ИИ-анализ матчапа: {hero_name.capitalize()}",
-                description=ai_text,
-                color=0x9B59B6
-            )
-            embed.set_footer(text="Powered by Gemini AI | Умный тактический движок")
-            
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            await ctx.send(f"⚠️ Ошибка при обращении к Gemini API: `{e}`")
-
-if __name__ == "__main__":
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        print("Ошибка: Токен не найден в переменных окружения DISCORD_TOKEN!")
-    else:
-        bot.run(token)
-
-if __name__ == "__main__":
-    bot.run(os.environ.get("DISCORD_TOKEN"))
-bot = commands.Bot(command_prefix="!", intents=intents)
-
 # Функция поиска (её обязательно нужно объявить ДО команд бота)
 def find_hero_by_query(query: str, heroes_data: list):
     query_clean = query.strip().lower()
@@ -1921,6 +1875,41 @@ async def meta_command(ctx):
         except Exception as e:
             await ctx.send(f"⚠️ Ошибка при загрузке меты: `{e}`")
 
+
+@bot.command(name="контра", aliases=["counter"])
+async def counter_command(ctx, hero_name: str, *, enemies_str: str):
+    async with ctx.typing():
+        try:
+            prompt = (
+                f"Ты профессиональный киберспортивный аналитик по Dota 2. "
+                f"Игрок пикает героя: {hero_name}. "
+                f"Вражеский пик: {enemies_str}. "
+                f"Дай краткий, но максимально экспертный разбор матчапа на русском языке. "
+                f"Структурируй ответ строго по пунктам: "
+                f"1. Главная угроза от вражеского пика для этого героя. "
+                f"2. Оптимальный порядок предметов (мидгейм и лейт, строго без промежуточных компонентов вроде Mithril Hammer или Crystalys). "
+                f"3. Ключевые контр-предметы под этот конкретный пик (с пояснением зачем они нужны). "
+                f"4. План на драку (кого фокусить, как позиционироваться)."
+            )
+
+            response = ai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+            )
+            
+            ai_text = response.text
+
+            embed = discord.Embed(
+                title=f"⚔️ ИИ-анализ матчапа: {hero_name.capitalize()}",
+                description=ai_text,
+                color=0x9B59B6
+            )
+            embed.set_footer(text="Powered by Gemini AI | Умный тактический движок")
+            
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"⚠️ Ошибка при обращении к Gemini API: `{e}`")
             
 # Добавь этот код перед запуском бота, чтобы Render видел открытый порт
 async def handle(request):

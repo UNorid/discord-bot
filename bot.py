@@ -19,63 +19,30 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # ============================================================
-# STRATZ API (Dota 2) — конфигурация
+# OpenDota API (Dota 2) — конфигурация
 # ============================================================
-# ВНИМАНИЕ (важно прочитать):
-# Токен ниже вшит как значение по умолчанию, чтобы бот сразу заработал.
-# Но т.к. этот файл вы, скорее всего, будете где-то хранить (репозиторий,
-# Render, и т.д.), настоятельно рекомендуется вместо этого задать
-# переменную окружения STRATZ_TOKEN в настройках хостинга (точно так же,
-# как вы уже делаете с TOKEN для Discord) и НЕ публиковать файл с токеном
-# в открытом виде — если токен "утечёт", его сможет использовать кто угодно
-# от вашего имени, и STRATZ может урезать/заблокировать доступ.
-STRATZ_TOKEN = os.getenv(
-    "STRATZ_TOKEN",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJTdWJqZWN0IjoiMTBiODRlNDYtODZhZi00MDA2LTkzMjgtYTlmYTRhMmIzYWUzIiwiU3RlYW1JZCI6IjE4ODIzMTQzMDEiLCJBUElVc2VyIjoidHJ1ZSIsIm5iZiI6MTc4ODU2MjgzNCwiZXhwIjoxODIwMDk4ODM0LCJpYXQiOjE3ODg1NjI4MzQsImlzcyI6Imh0dHBzOi8vYXBpLnN0cmF0ei5jb20ifQ._ALz7LvZ-WGIqIN1qSsjwlKMbj87rUuRpf89DMb_dEc",
-)
-STRATZ_GRAPHQL_URL = "https://api.stratz.com/graphql"
+# Раньше здесь использовался STRATZ GraphQL API, но запросы с IP хостинга
+# (Render) блокировались Cloudflare-проверкой ("Just a moment...") ещё до
+# того, как доходили до сервера — при этом с домашнего ПК тем же токеном
+# всё работало. Так что дело было не в токене и не в коде, а в репутации
+# IP-адресов Render у Cloudflare.
+#
+# OpenDota — открытый REST API без обязательного токена (есть бесплатный
+# лимит запросов без ключа), обычно гораздо мягче относится к запросам с
+# облачных хостингов. Если и он вдруг начнёт блокироваться — можно завести
+# бесплатный API-ключ на opendota.com и передавать его через переменную
+# окружения OPENDOTA_API_KEY.
+OPENDOTA_BASE_URL = "https://api.opendota.com/api"
+OPENDOTA_API_KEY = os.getenv("OPENDOTA_API_KEY", "")  # необязательно
 
-# STRATZ требует указывать корректный User-Agent — иначе может отдавать ошибку.
-# Дополнительные заголовки (Accept/Origin/Referer) помогают запросу выглядеть
-# "по-браузерному" — некоторые API/CDN (Cloudflare и т.п.) блокируют запросы
-# без них, отдавая вместо JSON html-страницу с 403.
-STRATZ_HEADERS = {
-    "Authorization": f"Bearer {STRATZ_TOKEN}",
-    "Content-Type": "application/json",
+OPENDOTA_HEADERS = {
     "Accept": "application/json",
     "User-Agent": "PRACHKA-DRACHKA-DiscordBot/1.0",
-    "Origin": "https://stratz.com",
-    "Referer": "https://stratz.com/",
 }
 
-STRATZ_MATCH_QUERY = """
-query MatchDetails($matchId: Long!) {
-  match(id: $matchId) {
-    id
-    didRadiantWin
-    durationSeconds
-    startDateTime
-    gameMode
-    players {
-      steamAccountId
-      isRadiant
-      kills
-      deaths
-      assists
-      numLastHits
-      goldPerMinute
-      experiencePerMinute
-      networth
-      hero {
-        displayName
-      }
-      steamAccount {
-        name
-      }
-    }
-  }
-}
-"""
+# Кэш названий героев (hero_id -> человекочитаемое имя), чтобы не запрашивать
+# список героев при каждом вызове команды.
+HERO_NAMES_CACHE = {}
 
 
 def format_duration(total_seconds):
@@ -86,59 +53,78 @@ def format_duration(total_seconds):
     return f"{minutes}:{seconds:02d}"
 
 
-async def fetch_stratz_match(match_id: int):
-    """Делает запрос к STRATZ GraphQL API и возвращает данные матча (dict) либо кидает исключение."""
-    payload = {
-        "query": STRATZ_MATCH_QUERY,
-        "variables": {"matchId": match_id},
-    }
+async def load_hero_names():
+    """Загружает и кэширует список героев Dota 2 (id -> имя) с OpenDota."""
+    global HERO_NAMES_CACHE
+    if HERO_NAMES_CACHE:
+        return
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{OPENDOTA_BASE_URL}/heroes", headers=OPENDOTA_HEADERS
+            ) as resp:
+                if resp.status == 200:
+                    heroes = await resp.json()
+                    HERO_NAMES_CACHE = {
+                        h["id"]: h.get("localized_name", f"Герой #{h['id']}")
+                        for h in heroes
+                    }
+    except Exception as e:
+        print(f"Не удалось загрузить список героев с OpenDota: {e}")
+
+
+def get_hero_name(hero_id: int) -> str:
+    return HERO_NAMES_CACHE.get(hero_id, f"Герой #{hero_id}")
+
+
+async def fetch_opendota_match(match_id: int):
+    """Делает запрос к OpenDota REST API и возвращает данные матча (dict) либо кидает исключение."""
+    await load_hero_names()
+
+    url = f"{OPENDOTA_BASE_URL}/matches/{match_id}"
+    params = {}
+    if OPENDOTA_API_KEY:
+        params["api_key"] = OPENDOTA_API_KEY
+
     timeout = aiohttp.ClientTimeout(total=15)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(
-            STRATZ_GRAPHQL_URL, json=payload, headers=STRATZ_HEADERS
+        async with session.get(
+            url, headers=OPENDOTA_HEADERS, params=params
         ) as resp:
             raw_text = await resp.text()
             content_type = resp.headers.get("Content-Type", "")
 
-            # Если сервер вернул не JSON (например html-страницу блокировки от
-            # Cloudflare/WAF), сразу даём понятную диагностику вместо падения
-            # с невнятным ContentTypeError.
+            # Если сервер вернул не JSON (например html-страницу блокировки),
+            # сразу даём понятную диагностику вместо падения с невнятной ошибкой.
             if "application/json" not in content_type:
                 snippet = raw_text.strip().replace("\n", " ")[:200]
                 raise RuntimeError(
-                    f"STRATZ API вернул не-JSON ответ (статус {resp.status}, "
-                    f"Content-Type: {content_type or 'не указан'}). Это похоже "
-                    f"на блокировку запроса (например, Cloudflare/WAF), а не на "
-                    f"ошибку самого GraphQL-запроса. Начало ответа: «{snippet}»"
+                    f"OpenDota API вернул не-JSON ответ (статус {resp.status}, "
+                    f"Content-Type: {content_type or 'не указан'}). Начало ответа: «{snippet}»"
                 )
 
             try:
                 data = json.loads(raw_text)
             except json.JSONDecodeError:
                 raise RuntimeError(
-                    f"Не удалось разобрать JSON от STRATZ API (статус {resp.status})."
+                    f"Не удалось разобрать JSON от OpenDota API (статус {resp.status})."
                 )
 
             if resp.status != 200:
                 raise RuntimeError(
-                    f"STRATZ API вернул статус {resp.status}: {data}"
+                    f"OpenDota API вернул статус {resp.status}: {data}"
                 )
 
-            if "errors" in data and data["errors"]:
-                raise RuntimeError(
-                    "; ".join(err.get("message", "Неизвестная ошибка") for err in data["errors"])
-                )
-
-            match_data = data.get("data", {}).get("match")
-            if not match_data:
+            if not data or "match_id" not in data:
                 raise ValueError("Матч не найден. Проверь ID матча.")
 
-            return match_data
+            return data
 
 
 def build_match_embed(match_data: dict, match_id: int) -> discord.Embed:
-    radiant_win = match_data.get("didRadiantWin")
-    duration = format_duration(match_data.get("durationSeconds"))
+    radiant_win = match_data.get("radiant_win")
+    duration = format_duration(match_data.get("duration"))
     players = match_data.get("players") or []
 
     winner_text = "🟢 Победа Radiant" if radiant_win else "🔴 Победа Dire"
@@ -153,20 +139,26 @@ def build_match_embed(match_data: dict, match_id: int) -> discord.Embed:
     dire_lines = []
 
     for p in players:
-        hero_name = (p.get("hero") or {}).get("displayName") or "Неизвестный герой"
-        acc_name = (p.get("steamAccount") or {}).get("name") or "Аноним"
+        hero_name = get_hero_name(p.get("hero_id", 0))
+        acc_name = p.get("personaname") or "Аноним"
         kills = p.get("kills", 0)
         deaths = p.get("deaths", 0)
         assists = p.get("assists", 0)
-        gpm = p.get("goldPerMinute", 0)
-        xpm = p.get("experiencePerMinute", 0)
+        gpm = p.get("gold_per_min", 0)
+        xpm = p.get("xp_per_min", 0)
 
         line = (
             f"**{hero_name}** ({acc_name})\n"
             f"⚔️ `{kills}/{deaths}/{assists}` • 💰 GPM `{gpm}` • ✨ XPM `{xpm}`"
         )
 
-        if p.get("isRadiant"):
+        # isRadiant может отсутствовать в некоторых ответах — тогда определяем
+        # команду по player_slot (0-127 = Radiant, 128+ = Dire).
+        is_radiant = p.get("isRadiant")
+        if is_radiant is None:
+            is_radiant = (p.get("player_slot", 0) or 0) < 128
+
+        if is_radiant:
             radiant_lines.append(line)
         else:
             dire_lines.append(line)
@@ -182,13 +174,13 @@ def build_match_embed(match_data: dict, match_id: int) -> discord.Embed:
         inline=True,
     )
 
-    embed.set_footer(text="Данные предоставлены STRATZ API")
+    embed.set_footer(text="Данные предоставлены OpenDota API")
     return embed
 
 
-@bot.command(name="матч", aliases=["стратз", "stratz", "dota"])
-async def stratz_match(ctx, match_id: int = None):
-    """Анализ матча Dota 2 по его ID через STRATZ API."""
+@bot.command(name="матч", aliases=["дота", "dota", "opendota"])
+async def dota_match(ctx, match_id: int = None):
+    """Анализ матча Dota 2 по его ID через OpenDota API."""
     if match_id is None:
         await ctx.send(
             f"⚠️ {ctx.author.mention}, укажи ID матча! Пример: `!матч 7891234567`",
@@ -196,16 +188,16 @@ async def stratz_match(ctx, match_id: int = None):
         )
         return
 
-    loading_msg = await ctx.send(f"🔎 Ищу данные о матче `#{match_id}` в STRATZ...")
+    loading_msg = await ctx.send(f"🔎 Ищу данные о матче `#{match_id}` в OpenDota...")
 
     try:
-        match_data = await fetch_stratz_match(match_id)
+        match_data = await fetch_opendota_match(match_id)
         embed = build_match_embed(match_data, match_id)
         await loading_msg.edit(content=None, embed=embed)
     except ValueError as e:
         await loading_msg.edit(content=f"❌ {e}")
     except asyncio.TimeoutError:
-        await loading_msg.edit(content="❌ STRATZ API не ответил вовремя. Попробуй позже.")
+        await loading_msg.edit(content="❌ OpenDota API не ответил вовремя. Попробуй позже.")
     except Exception as e:
         await loading_msg.edit(
             content=f"❌ Не удалось получить данные о матче: `{e}`"
@@ -529,6 +521,7 @@ async def auto_leaderboard():
 async def on_ready():
     print(f"Бот {bot.user} в деле!")
     asyncio.create_task(start_web_server())
+    asyncio.create_task(load_hero_names())
     if not auto_leaderboard.is_running():
         auto_leaderboard.start()
     if not voice_exp_loop.is_running():
@@ -851,7 +844,7 @@ async def commands_list(ctx):
         "`!ежедневка` (или `!бонус`) — Забрать ежедневную награду (XP).\n"
         "`!казино [ставка]` (или `!кости`) — Сыграть в кости на XP против бота (ставка от 10 до 500).\n"
         "`!дуэль @Юзер [ставка]` (или `!махач`) — Устроить уличный замес на XP с другим бойцом.\n"
-        "`!матч [ID]` (или `!стратз`) — Анализ матча Dota 2 через STRATZ API.\n"
+        "`!матч [ID]` (или `!дота`) — Анализ матча Dota 2 через OpenDota API.\n"
         "`!команды` (или `!помощь`) — Вызвать это справочное меню в ЛС."
     )
     embed.add_field(name="⭐ Игровые и общие команды", value=general_cmds, inline=False)

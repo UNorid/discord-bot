@@ -1650,9 +1650,9 @@ async def hero_command(ctx, *, hero_query: str):
                 await ctx.send(f"❌ Герой **{hero_query}** не найден.")
                 return
 
-            # ИЗМЕНЕНИЕ ЗДЕСЬ: берем чистый системный ключ и собираем ссылку через cdn.opendota.com
+            # ИСПРАВЛЕННАЯ ССЫЛКА НА STEAM CDN
             hero_name_clean = target_hero.get('name', '').replace('npc_dota_hero_', '')
-            image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_name_clean}_full.png"
+            image_url = f"https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/{hero_name_clean}.png"
 
             embed = discord.Embed(
                 title=f"🛡️ Разбор героя: {target_hero['localized_name']}",

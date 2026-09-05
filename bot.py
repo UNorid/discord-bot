@@ -1629,6 +1629,36 @@ async def secret(ctx):
     except:
         pass
 
+@bot.command(name="герой", aliases=["hero"])
+async def hero_command(ctx, *, hero_query: str):
+    await load_hero_names()
+    
+    # Ищем ID героя по введенному имени
+    hero_id = resolve_hero_id(hero_query) if 'resolve_hero_id' in globals() else None
+    
+    # Если функция поиска по имени не объявлена отдельно, пройдемся прямо по кэшу
+    if not hero_id and HERO_NAMES_CACHE:
+        for hid, hdata in HERO_NAMES_CACHE.items():
+            if hdata.get("localized_name", "").lower() == hero_query.lower():
+                hero_id = hid
+                break
+
+    if not hero_id:
+        await ctx.send(f"❌ Герой **{hero_query}** не найден. Проверь название.")
+        return
+
+    hero_name = get_hero_name(hero_id)
+    hero_code_name = hero_name.lower().replace(" ", "_").replace("'", "")
+    image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_code_name}_full.png"
+
+    embed = discord.Embed(
+        title=f"🛡️ Разбор героя: {hero_name}",
+        color=0x8B0000
+    )
+    embed.set_thumbnail(url=image_url)
+    embed.set_footer(text=f"ID героя в системе: {hero_id}")
+
+    await ctx.send(embed=embed)
 
 if __name__ == "__main__":
     token = os.getenv("TOKEN")

@@ -1642,7 +1642,7 @@ async def hero_info(ctx, *, hero_name: str):
                     break
 
             if not target_hero:
-                await ctx.send(f"❌ Герой **{hero_name}** не найден.")
+                await ctx.send(f"❌ Герой **{hero_name}** не найден. Проверь написание.")
                 return
 
             embed = discord.Embed(
@@ -1650,14 +1650,12 @@ async def hero_info(ctx, *, hero_name: str):
                 color=0x8B0000
             )
 
-            # ИСПРАВЛЕНИЕ ДЛЯ КАРТИНКИ:
-            # Поле 'name' возвращает значение вроде 'npc_dota_hero_muerta'. 
-            # Нам нужно убрать префикс 'npc_dota_hero_', чтобы получить просто 'muerta' для ссылки.
+            # Формируем правильную ссылку на картинку
             hero_code_name = target_hero.get('name', '').replace('npc_dota_hero_', '')
-            
-            # Собираем правильную ссылку на полный арт героя от Valve/OpenDota CDN
             image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_code_name}_full.png"
-            embed.set_image(url=image_url)
+            
+            # ТЕСТОВО ИСПОЛЬЗУЕМ THUMBNAIL (маленькая иконка справа вместо большой картинки)
+            embed.set_thumbnail(url=image_url)
 
             attr_map = {"str": "Сила 💪", "agi": "Ловкость 🏃‍♂️", "int": "Интеллект 🧠", "all": "Универсальный ✨"}
             primary_attr = attr_map.get(target_hero.get('primary_attr'), "Неизвестно")

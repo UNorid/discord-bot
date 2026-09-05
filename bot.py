@@ -363,7 +363,10 @@ async def find_similar_pro_match(hero_id: int, enemy_hero_ids):
 
 
 def build_comparison_embed(you: dict, pro: dict, hero_id: int, enemy_heroes, match_id: int) -> discord.Embed:
-    hero_name = get_hero_name(hero_id)
+    hero_data = get_hero_data(hero_id)
+    hero_name = hero_data["localized_name"]
+    hero_code_name = hero_data["name"]
+    
     pro_account_id = pro.get("account_id")
     pro_name = PRO_PLAYERS_CACHE.get(pro_account_id, f"Игрок #{pro_account_id}")
 
@@ -373,8 +376,8 @@ def build_comparison_embed(you: dict, pro: dict, hero_id: int, enemy_heroes, mat
     you_items = item_set(you)
     pro_items = item_set(pro)
 
-    missing_items = pro_items - you_items   # было у про, нет у тебя
-    extra_items = you_items - pro_items     # было у тебя, нет у про
+    missing_items = pro_items - you_items    # было у про, нет у тебя
+    extra_items = you_items - pro_items      # было у тебя, нет у про
 
     def fmt_items(ids):
         names = [ITEM_NAMES_CACHE.get(i, f"Предмет #{i}") for i in ids]
@@ -388,6 +391,12 @@ def build_comparison_embed(you: dict, pro: dict, hero_id: int, enemy_heroes, mat
         ),
         color=0x8B0000,
     )
+
+    # === ДОБАВЛЯЕМ КАРТИНКУ ГЕРОЯ СПРАВА ===
+    if hero_code_name:
+        image_url = f"https://cdn.opendota.com/apps/dota2/images/heroes/{hero_code_name}_full.png"
+        embed.set_thumbnail(url=image_url)
+    # ========================================
 
     you_kills, you_deaths, you_assists = you.get("kills", 0), you.get("deaths", 0), you.get("assists", 0)
     pro_kills, pro_deaths, pro_assists = pro.get("kills", 0), pro.get("deaths", 0), pro.get("assists", 0)
@@ -444,7 +453,6 @@ def build_comparison_embed(you: dict, pro: dict, hero_id: int, enemy_heroes, mat
     enemy_names = ", ".join(get_hero_name(h) for h in enemy_heroes) if enemy_heroes else "неизвестно"
     embed.set_footer(text=f"Против: {enemy_names} • Данные: OpenDota API (Explorer)")
     return embed
-
 
 @bot.command(name="сравнить", aliases=["анализ", "compare", "прокомпар"])
 async def compare_with_pro(ctx, match_id: int = None, *, hero_query: str = None):
@@ -1625,50 +1633,36 @@ async def secret(ctx):
         pass
 
 @bot.command(name="герой", aliases=["hero"])
-async def hero_info(ctx, *, hero_name: str):
-    async with ctx.typing():
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get("https://api.opendota.com/api/heroStats") as resp:
-                    if resp.status != 200:
-                        await ctx.send("❌ Не удалось получить данные от OpenDota API.")
-                        return
-                    heroes_data = await resp.json()
+async def load_hero_names():
+    """Загружает и кэширует список героев Dota 2 (id -> данные) с OpenDota."""
+    global HERO_NAMES_CACHE
+    if HERO_NAMES_CACHE:
+        return
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{OPENDOTA_BASE_URL}/heroes", headers=OPENDOTA_HEADERS
+            ) as resp:
+                if resp.status == 200:
+                    heroes = await resp.json()
+                    # Сохраняем и локализованное имя, и системное имя для картинок
+                    HERO_NAMES_CACHE = {
+                        h["id"]: {
+                            "name": h.get("name", "").replace("npc_dota_hero_", ""),
+                            "localized_name": h.get("localized_name", f"Герой #{h['id']}")
+                        }
+                        for h in heroes
+                    }
+    except Exception as e:
+        print(f"Не удалось загрузить список героев с OpenDota: {e}")
 
-            target_hero = None
-            for h in heroes_data:
-                if h.get("localized_name", "").lower() == hero_name.lower():
-                    target_hero = h
-                    break
+# Изменяем вспомогательную функцию под новый кэш
+def get_hero_data(hero_id: int) -> dict:
+    return HERO_NAMES_CACHE.get(hero_id, {"name": "", "localized_name": f"Герой #{hero_id}"})
 
-            if not target_hero:
-                await ctx.send(f"❌ Герой **{hero_name}** не найден. Проверь написание.")
-                return
-
-            embed = discord.Embed(
-                title=f"🛡️ Разбор героя: {target_hero['localized_name']}",
-                color=0x8B0000
-            )
-
-            # Берем готовый путь прямо из поля 'img' ответа OpenDota
-            # Пример ключа: /apps/dota2/images/heroes/muerta_full.png
-            img_path = target_hero.get('img', '')
-            image_url = f"https://api.opendota.com{img_path}"
-            
-            # Устанавливаем картинку в виде миниатюры справа
-            embed.set_thumbnail(url=image_url)
-
-            attr_map = {"str": "Сила 💪", "agi": "Ловкость 🏃‍♂️", "int": "Интеллект 🧠", "all": "Универсальный ✨"}
-            primary_attr = attr_map.get(target_hero.get('primary_attr'), "Неизвестно")
-
-            embed.add_field(name="Основной атрибут", value=primary_attr, inline=True)
-            embed.add_field(name="Атакующий тип", value=target_hero.get('attack_type', 'Неизвестно'), inline=True)
-            embed.set_footer(text=f"ID героя: {target_hero.get('id')}")
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            await ctx.send(f"⚠️ Ошибка: `{e}`")
+def get_hero_name(hero_id: int) -> str:
+    return get_hero_data(hero_id)["localized_name"]
 
 if __name__ == "__main__":
     token = os.getenv("TOKEN")

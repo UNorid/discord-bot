@@ -315,6 +315,106 @@ async def dota_match(ctx, match_id: int = None):
 
 ITEM_NAMES_CACHE = {}
 PRO_PLAYERS_CACHE = {}
+HEROES_LIST_CACHE = []  # полный список героев (heroStats) для поиска по алиасам/нечетким совпадениям
+
+
+async def load_heroes_list():
+    """Загружает и кэширует полный список героев с OpenDota (heroStats),
+    включая тех/русские названия — нужен для поиска героя по запросу игрока."""
+    global HEROES_LIST_CACHE
+    if HEROES_LIST_CACHE:
+        return HEROES_LIST_CACHE
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{OPENDOTA_BASE_URL}/heroStats", headers=OPENDOTA_HEADERS
+            ) as resp:
+                if resp.status == 200:
+                    HEROES_LIST_CACHE = await resp.json()
+    except Exception as e:
+        print(f"Не удалось загрузить heroStats с OpenDota: {e}")
+    return HEROES_LIST_CACHE
+
+
+async def fetch_hero_matchups(hero_id: int):
+    """Возвращает список матчапов героя (winrate против каждого другого героя)."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{OPENDOTA_BASE_URL}/heroes/{hero_id}/matchups", headers=OPENDOTA_HEADERS
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        print(f"Не удалось загрузить матчапы для героя {hero_id}: {e}")
+    return []
+
+
+def get_matchup_entry(matchups: list, opponent_hero_id: int):
+    for m in matchups:
+        if m.get("hero_id") == opponent_hero_id:
+            return m
+    return None
+
+
+async def compute_pick_duel_result(hero_a: dict, hero_b: dict):
+    """Сравнивает двух героев по реальной статистике матчапов OpenDota.
+    Возвращает (advantage_a_percent, games_sample, entry_a, entry_b), где
+    advantage_a_percent — оценка вероятности победы hero_a над hero_b (0-100)."""
+    hero_a_id = hero_a.get("id")
+    hero_b_id = hero_b.get("id")
+
+    matchups_a, matchups_b = await asyncio.gather(
+        fetch_hero_matchups(hero_a_id), fetch_hero_matchups(hero_b_id)
+    )
+
+    entry_a = get_matchup_entry(matchups_a, hero_b_id)  # A против B
+    entry_b = get_matchup_entry(matchups_b, hero_a_id)  # B против A
+
+    estimates = []
+    games_sample = 0
+
+    if entry_a and entry_a.get("games_played"):
+        estimates.append((entry_a["wins"] / entry_a["games_played"]) * 100)
+        games_sample += entry_a["games_played"]
+
+    if entry_b and entry_b.get("games_played"):
+        # winrate B против A -> переводим в "шанс победы A"
+        winrate_b = (entry_b["wins"] / entry_b["games_played"]) * 100
+        estimates.append(100 - winrate_b)
+        games_sample += entry_b["games_played"]
+
+    advantage_a = sum(estimates) / len(estimates) if estimates else 50.0
+
+    return advantage_a, games_sample, entry_a, entry_b
+
+
+async def generate_pick_duel_explanation(hero_a: dict, hero_b: dict, advantage_a: float, games_sample: int):
+    """Генерирует короткое объяснение через Gemini, почему один пик сильнее другого."""
+    winner_name = hero_a["localized_name"] if advantage_a >= 50 else hero_b["localized_name"]
+    loser_name = hero_b["localized_name"] if advantage_a >= 50 else hero_a["localized_name"]
+    edge = max(advantage_a, 100 - advantage_a)
+
+    prompt = (
+        f"Ты профессиональный киберспортивный аналитик по Dota 2. "
+        f"Сравнивается пик двух героев на одну и ту же позицию/линию: {hero_a['localized_name']} против {hero_b['localized_name']}. "
+        f"По статистике реальных матчей {winner_name} побеждает {loser_name} примерно в {edge:.1f}% случаев (выборка ~{games_sample} игр). "
+        f"Объясни на русском языке кратко (3-4 предложения, без списков), почему пик {winner_name} сильнее в этом противостоянии: "
+        f"какие механики, способности или тайминги дают ему преимущество против {loser_name}."
+    )
+
+    try:
+        response = await generate_with_retry(ai_client, 'gemini-3.6-flash', contents=prompt)
+        return response.text
+    except Exception:
+        if games_sample > 0:
+            return (
+                f"По статистике реальных матчей **{winner_name}** имеет преимущество над "
+                f"**{loser_name}** в этом противостоянии (выборка ~{games_sample} игр)."
+            )
+        return "Недостаточно статистики для развернутого объяснения этого матчапа."
 
 
 async def load_item_names():
@@ -1219,6 +1319,166 @@ class DuelAcceptView(View):
         await interaction.response.send_message(f"🛡️ {self.target.mention} благоразумно уклонился от драки.", ephemeral=False)
 
 
+class HeroPickModal(Modal, title="Выбери героя для пик-дуэли"):
+    hero_input = TextInput(
+        label="Название героя",
+        placeholder="Например: Pudge, Invoker, войд, тб...",
+        max_length=40,
+    )
+
+    def __init__(self, view: "PickDuelView"):
+        super().__init__()
+        self.pick_view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        hero = find_hero_by_query(self.hero_input.value, self.pick_view.heroes_data)
+        if not hero:
+            await interaction.response.send_message(
+                f"❌ Герой «{self.hero_input.value}» не найден. Нажми кнопку еще раз и попробуй другое название.",
+                ephemeral=True,
+            )
+            return
+
+        self.pick_view.picks[interaction.user.id] = hero
+        await interaction.response.send_message(
+            f"✅ Твой пик принят: **{hero['localized_name']}**", ephemeral=True
+        )
+        await self.pick_view.update_progress()
+
+        if len(self.pick_view.picks) == 2:
+            await self.pick_view.resolve()
+
+
+class PickDuelView(View):
+    def __init__(self, challenger: discord.Member, target: discord.Member, heroes_data: list):
+        super().__init__(timeout=120)
+        self.challenger = challenger
+        self.target = target
+        self.heroes_data = heroes_data
+        self.picks = {}
+        self.message = None
+        self.resolved = False
+
+    def build_embed(self):
+        embed = discord.Embed(
+            title="🆚 ПИК-ДУЭЛЬ",
+            description=(
+                f"{self.challenger.mention} против {self.target.mention}!\n"
+                f"Каждый выбирает по одному герою на одну и ту же роль/линию. "
+                f"Бот сравнит пики по реальной статистике матчапов OpenDota."
+            ),
+            color=0x8B0000,
+        )
+
+        def status_for(member: discord.Member):
+            pick = self.picks.get(member.id)
+            return f"🎯 **{pick['localized_name']}**" if pick else "⏳ Ожидание пика..."
+
+        embed.add_field(name=self.challenger.display_name, value=status_for(self.challenger), inline=True)
+        embed.add_field(name=self.target.display_name, value=status_for(self.target), inline=True)
+        embed.set_footer(text="У каждого 120 секунд, чтобы сделать пик • OpenDota API")
+        return embed
+
+    async def update_progress(self):
+        if self.message:
+            try:
+                await self.message.edit(embed=self.build_embed())
+            except Exception:
+                pass
+
+    @discord.ui.button(label="🎯 Выбрать героя", style=discord.ButtonStyle.success, custom_id="pickduel_pick")
+    async def pick_button(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id not in (self.challenger.id, self.target.id):
+            await interaction.response.send_message("Эта пик-дуэль не для тебя!", ephemeral=True)
+            return
+        if interaction.user.id in self.picks:
+            await interaction.response.send_message("Ты уже сделал свой пик, жди соперника!", ephemeral=True)
+            return
+        await interaction.response.send_modal(HeroPickModal(self))
+
+    async def resolve(self):
+        if self.resolved:
+            return
+        self.resolved = True
+        self.stop()
+
+        for child in self.children:
+            child.disabled = True
+
+        hero_a = self.picks[self.challenger.id]
+        hero_b = self.picks[self.target.id]
+
+        try:
+            advantage_a, games_sample, entry_a, entry_b = await compute_pick_duel_result(hero_a, hero_b)
+            explanation = await generate_pick_duel_explanation(hero_a, hero_b, advantage_a, games_sample)
+        except Exception as e:
+            if self.message:
+                await self.message.edit(
+                    content=f"❌ Не удалось посчитать результат пик-дуэли: `{e}`",
+                    embed=None,
+                    view=None,
+                )
+            return
+
+        embed = discord.Embed(title="🏆 РЕЗУЛЬТАТ ПИК-ДУЭЛИ", color=0x8B0000)
+        embed.add_field(
+            name=f"🧑 {self.challenger.display_name}",
+            value=f"**{hero_a['localized_name']}**",
+            inline=True,
+        )
+        embed.add_field(
+            name=f"🧑 {self.target.display_name}",
+            value=f"**{hero_b['localized_name']}**",
+            inline=True,
+        )
+
+        if games_sample == 0:
+            embed.description = "🤝 В базе OpenDota нет достаточной статистики по этому конкретному матчапу."
+        elif abs(advantage_a - 50) < 2:
+            embed.description = "🤝 По статистике этот матчап практически равный, преимущества нет ни у кого."
+        elif advantage_a > 50:
+            embed.description = f"🏆 **Побеждает пик:** {self.challenger.mention} ({hero_a['localized_name']})"
+        else:
+            embed.description = f"🏆 **Побеждает пик:** {self.target.mention} ({hero_b['localized_name']})"
+
+        embed.add_field(
+            name="📈 Статистика матчапа",
+            value=(
+                f"**{hero_a['localized_name']}** побеждает **{hero_b['localized_name']}** "
+                f"в **{advantage_a:.1f}%** партий (выборка ~{games_sample} игр)"
+            ),
+            inline=False,
+        )
+        embed.add_field(name="🧠 Почему так", value=explanation, inline=False)
+
+        if games_sample and games_sample < 50:
+            embed.set_footer(text="⚠️ Небольшая выборка данных — статистика может быть неточной • OpenDota API")
+        else:
+            embed.set_footer(text="Данные: OpenDota API (Matchups) • Powered by Gemini AI")
+
+        if self.message:
+            await self.message.edit(embed=embed, view=None)
+
+    async def on_timeout(self):
+        if self.resolved:
+            return
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            missing = [
+                m.display_name for m in (self.challenger, self.target)
+                if m.id not in self.picks
+            ]
+            try:
+                await self.message.edit(
+                    content=f"⌛ Время на пик вышло. Не успел(и) сделать выбор: {', '.join(missing)}.",
+                    embed=None,
+                    view=None,
+                )
+            except Exception:
+                pass
+
+
 class SborView(View):
     def __init__(self, game_name: str):
         super().__init__(timeout=None)
@@ -1254,6 +1514,7 @@ COMMAND_INFO = {
     "мета":      ("Топ героев меты по позициям.", "🐲 Dota 2"),
     "сравнить":  ("Сравнить свою игру на герое с похожей игрой про-игрока.", "🐲 Dota 2"),
     "контра":    ("ИИ-анализ матчапа (Gemini): угрозы, билд, контр-предметы, план на драку.", "🐲 Dota 2"),
+    "пикдуэль":  ("Дуэль пиков: выберите с соперником по герою, бот определит, чей пик сильнее (и почему).", "🐲 Dota 2"),
 
     "хаб":       ("Отправить интерактивную панель управления.", "🛠️ Интерфейс"),
     "сбор":      ("Объявить общий сбор игроков.", "🛠️ Интерфейс"),
@@ -1609,6 +1870,37 @@ async def duel(ctx, member: discord.Member, bet: int = 50):
 
     embed.description = "\n".join(round_logs) + f"\n\n-------------------\n{result_text}"
     await msg.edit(content=None, embed=embed, view=None)
+
+
+@bot.command(name="пикдуэль", aliases=["pickduel", "драфт", "пикч"])
+async def pick_duel(ctx, target: discord.Member = None):
+    """Пик-дуэль: два игрока выбирают по герою, бот сравнивает их по реальной
+    статистике матчапов OpenDota и объясняет, чей пик сильнее."""
+    if target is None:
+        await ctx.send(
+            f"⚠️ {ctx.author.mention}, укажи соперника! Пример: `!пикдуэль @Игрок`",
+            delete_after=8,
+        )
+        return
+
+    if target.bot:
+        await ctx.send("🤖 С ботом в пик-дуэль не сыграть, зови живого соперника!", delete_after=5)
+        return
+
+    if target == ctx.author:
+        await ctx.send("🤡 Сам с собой пикаешь? Позови другого бойца.", delete_after=5)
+        return
+
+    loading_msg = await ctx.send("🔎 Загружаю базу героев OpenDota...")
+    heroes_data = await load_heroes_list()
+
+    if not heroes_data:
+        await loading_msg.edit(content="❌ Не удалось загрузить список героев с OpenDota. Попробуй позже.")
+        return
+
+    view = PickDuelView(ctx.author, target, heroes_data)
+    await loading_msg.edit(content=None, embed=view.build_embed(), view=view)
+    view.message = loading_msg
 
 
 @bot.command(name="настройка", aliases=["setup"])
